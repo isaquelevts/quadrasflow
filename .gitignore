@@ -1,5 +1,12 @@
+node_modules/
+dist/
 .env
-/data/
+.env.*
+!.env.example
+!.env.next.example
+deploy/staging.env
+coverage/
+.DS_Store
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

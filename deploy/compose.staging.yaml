@@ -1,0 +1,60 @@
+name: quadrasflow-next
+
+services:
+  database:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    env_file: ./staging.env
+    environment:
+      POSTGRES_DB: quadrasflow
+    volumes:
+      - quadrasflow_next_pgdata:/var/lib/postgresql/data
+    networks: [private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file: ./staging.env
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: 3000
+    depends_on:
+      database:
+        condition: service_healthy
+    networks: [private, app]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:13013:8080"
+    networks: [app]
+
+networks:
+  private:
+    internal: true
+  app:
+    driver: bridge
+
+volumes:
+  quadrasflow_next_pgdata:

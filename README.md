@@ -96,3 +96,7 @@ As rotas de painel, quadras, clientes e reservas exigem sessão de usuário de a
 6. Agende `docker compose run --rm backup` diariamente no cron. O comando também mantém snapshots locais por 14 dias e envia cada arquivo ao remoto configurado.
 
 O serviço de backup depende de `sqlite3`, rclone e de um destino remoto configurado. Sem `BACKUP_REMOTE`, o script informa que a cópia ficou somente na VPS.
+
+## Migração de stack em andamento
+
+O repositório está sendo modernizado em uma branch de preparação. O serviço publicado continua usando a stack e o banco atuais até que a migração completa seja validada e autorizada para publicação. Consulte [MIGRATION.md](MIGRATION.md) para a arquitetura-alvo, as fases e os critérios de cutover.

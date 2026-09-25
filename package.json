@@ -1,12 +1,15 @@
 {
   "name": "quadrasflow",
-  "version": "0.1.0",
   "private": true,
-  "description": "Plataforma multiempresa de gestão de arenas esportivas",
   "type": "module",
-  "engines": { "node": ">=24.0.0" },
+  "engines": { "node": ">=24" },
+  "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "start": "node --env-file-if-exists=.env server.mjs",
-    "setup:admin": "node --env-file-if-exists=.env scripts/bootstrap-admin.mjs"
+    "build": "npm run build --workspace @quadrasflow/contracts && npm run build --workspace @quadrasflow/database && npm run build --workspace @quadrasflow/api && npm run build --workspace @quadrasflow/web",
+    "typecheck": "npm run typecheck --workspace @quadrasflow/contracts && npm run typecheck --workspace @quadrasflow/database && npm run typecheck --workspace @quadrasflow/api && npm run typecheck --workspace @quadrasflow/web",
+    "dev:web": "npm run dev --workspace @quadrasflow/web",
+    "dev:api": "npm run dev --workspace @quadrasflow/api",
+    "db:generate": "npm run db:generate --workspace @quadrasflow/database",
+    "db:migrate": "npm run db:migrate --workspace @quadrasflow/database"
   }
 }
