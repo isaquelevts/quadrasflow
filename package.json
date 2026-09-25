@@ -1,0 +1,12 @@
+{
+  "name": "quadrasflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plataforma multiempresa de gestão de arenas esportivas",
+  "type": "module",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "setup:admin": "node --env-file-if-exists=.env scripts/bootstrap-admin.mjs"
+  }
+}

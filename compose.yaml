@@ -1,0 +1,54 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /data
+      PORT: 3000
+    volumes:
+      - quadrasflow_data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      DOMAIN: ${DOMAIN:?Configure DOMAIN no .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+  backup:
+    profiles: ["maintenance"]
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      BACKUP_DIR: /backups
+    volumes:
+      - quadrasflow_data:/data
+      - ./backups:/backups
+      - ${RCLONE_CONFIG_PATH:?Configure RCLONE_CONFIG_PATH no .env}:/root/.config/rclone/rclone.conf:ro
+volumes:
+  quadrasflow_data:
+  caddy_data:
+  caddy_config:
