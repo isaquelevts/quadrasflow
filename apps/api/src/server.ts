@@ -4,11 +4,26 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import { ErrorResponseSchema, HealthResponseSchema } from '@quadrasflow/contracts';
+import { registerAuthRoutes } from './auth.js';
+import { registerArenaRoutes } from './arena.js';
+import { client as databaseClient } from './database.js';
+import { registerFinanceMonthlyRoutes } from './finance-monthly.js';
+import { registerTournamentRoutes } from './tournaments.js';
+import { registerPublicRoutes } from './public.js';
+import { registerWhatsAppRoutes } from './whatsapp.js';
+import { registerPlatformRoutes } from './platform.js';
+import { registerUserRoutes } from './users.js';
+import { registerMercadoPagoRoutes } from './mercadopago.js';
 
 const app = Fastify({
   logger: {
     level: process.env.LOG_LEVEL || 'info',
-    redact: ['req.headers.authorization', 'req.headers.cookie', 'req.headers.x-quadrasflow-secret'],
+    redact: ['req.headers.authorization', 'req.headers.cookie', 'req.headers.x-quadrasflow-secret', 'req.headers.x-api-key'],
+    serializers: {
+      req(request) {
+        return { method: request.method, url: request.url.split('?')[0] || '', host: request.host, remoteAddress: request.ip };
+      },
+    },
   },
   trustProxy: process.env.TRUST_PROXY === 'true',
   requestIdHeader: 'x-request-id',
@@ -30,6 +45,18 @@ app.get('/api/v1/health', {
     response: { 200: HealthResponseSchema, 500: ErrorResponseSchema },
   },
 }, async () => ({ ok: true as const, service: 'quadrasflow-api', version: '1.0.0' }));
+
+app.get('/api/health', async () => ({ ok: true as const }));
+await registerAuthRoutes(app);
+await registerArenaRoutes(app);
+await registerFinanceMonthlyRoutes(app);
+await registerTournamentRoutes(app);
+await registerPublicRoutes(app);
+await registerWhatsAppRoutes(app);
+await registerPlatformRoutes(app);
+await registerUserRoutes(app);
+await registerMercadoPagoRoutes(app);
+app.addHook('onClose', async () => { await databaseClient.end({ timeout: 5 }); });
 
 app.setErrorHandler((error, request, reply) => {
   request.log.error({ err: error }, 'Request failed');

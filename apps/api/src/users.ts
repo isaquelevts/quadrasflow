@@ -1,0 +1,12 @@
+import { randomBytes, randomUUID, scryptSync } from 'node:crypto';
+import { and, asc, eq } from 'drizzle-orm';
+import type { FastifyInstance } from 'fastify';
+import { users } from '@quadrasflow/database';
+import { db } from './database.js';
+import { adminOf, audit, companyOf, fail, text } from './arena.js';
+const bodyOf=(req:{body?:unknown})=>(req.body||{}) as Record<string,unknown>;
+export async function registerUserRoutes(app:FastifyInstance){const auth={preHandler:app.authenticate};
+ app.get('/api/arena/users',auth,async req=>{const companyId=companyOf(req);const list=await db.select({id:users.id,name:users.name,email:users.email,role:users.role,active:users.active,createdAt:users.createdAt}).from(users).where(eq(users.companyId,companyId)).orderBy(asc(users.createdAt));return {users:list.map(u=>({...u,created_at:u.createdAt}))};});
+ app.post('/api/arena/users',auth,async(req,reply)=>{const actor=adminOf(req),companyId=companyOf(req),b=bodyOf(req),name=text(b.name,'o nome do usuário'),email=String(b.email||'').trim().toLowerCase(),password=String(b.password||'');if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>254)throw fail(400,'Informe um e-mail válido.');if(password.length<14||password.length>200)throw fail(400,'A senha precisa ter pelo menos 14 caracteres.');const id=randomUUID(),salt=randomBytes(16).toString('hex'),passwordHash=scryptSync(password,salt,64).toString('hex'),createdAt=new Date().toISOString();try{await db.insert(users).values({id,companyId,name,email,passwordHash,passwordSalt:salt,role:'staff',active:true,createdAt});}catch(e){if((e as {code?:string}).code==='23505')throw fail(409,'Esse e-mail já possui uma conta no QuadrasFlow.');throw e;}await audit(companyId,actor.id,'user.staff_created','user',id);return reply.code(201).send({user:{id,name,email,role:'staff',active:true,created_at:createdAt}});});
+ app.patch('/api/arena/users/:id/status',auth,async req=>{const actor=adminOf(req),companyId=companyOf(req),{id}=req.params as {id:string},active=bodyOf(req).active;if(typeof active!=='boolean')throw fail(400,'Informe o novo estado do usuário.');if(id===actor.id&&!active)throw fail(400,'Você não pode desativar sua própria conta.');const row=(await db.select().from(users).where(and(eq(users.id,id),eq(users.companyId,companyId))).limit(1))[0];if(!row||row.role==='arena_admin')throw fail(404,'Funcionário não encontrado.');await db.update(users).set({active}).where(eq(users.id,id));await audit(companyId,actor.id,active?'user.staff_activated':'user.staff_deactivated','user',id);return {ok:true};});
+}

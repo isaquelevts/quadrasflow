@@ -1,4 +1,4 @@
-name: quadrasflow-next
+name: quadrasflow-cutover
 
 services:
   database:
@@ -17,27 +17,6 @@ services:
       retries: 6
       start_period: 15s
 
-  api:
-    build:
-      context: ..
-      dockerfile: apps/api/Dockerfile
-    restart: unless-stopped
-    env_file: ./staging.env
-    environment:
-      NODE_ENV: production
-      API_HOST: 0.0.0.0
-      API_PORT: 3000
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-    networks: [private, app]
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-
   migrate:
     build:
       context: ..
@@ -45,31 +24,62 @@ services:
       target: build
     command: ["npm", "run", "db:migrate", "--workspace", "@quadrasflow/database"]
     restart: "no"
-    env_file: ./staging.env
+    env_file: ./production.env
     depends_on:
       database:
         condition: service_healthy
     networks: [private]
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file: ./production.env
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: 3000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      private: {}
+      app:
+        aliases: [quadrasflow-cutover-api]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   web:
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
       args:
-        API_UPSTREAM: api
+        API_UPSTREAM: quadrasflow-cutover-api
     restart: unless-stopped
     depends_on:
       api:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:13013:8080"
-    networks: [app]
+    networks:
+      app: {}
+      easypanel:
+        aliases: [quadrasflow-new-web]
+    labels:
+      traefik.enable: "false"
 
 networks:
   private:
     internal: true
   app:
-    driver: bridge
+    external: true
+    name: quadrasflow-cutover_app
+  easypanel:
+    external: true
+    name: easypanel
 
 volumes:
   quadrasflow_next_pg18data:

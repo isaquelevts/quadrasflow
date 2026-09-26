@@ -1,4 +1,6 @@
 .env
+*.env
+deploy/*.env
 .git
 data
 backups
