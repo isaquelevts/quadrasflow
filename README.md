@@ -58,7 +58,7 @@ Não execute ferramentas de importação ou exportação com dados reais em ambi
 
 ## Produção
 
-A aplicação está publicada em `https://quadras.helioscreative.com.br`. O contêiner e o volume SQLite legados permanecem preservados enquanto a nova stack passa pela estabilização. O banco PostgreSQL não é compartilhado com outros produtos da VPS.
+A aplicação está publicada em `https://quadras.helioscreative.com.br`. O contêiner legado foi parado após a estabilização; seu volume SQLite e o snapshot pré-corte permanecem preservados para rollback. O banco PostgreSQL não é compartilhado com outros produtos da VPS.
 
 O snapshot SQLite pré-corte está em `/opt/quadrasflow/backups`. Há um backup PostgreSQL verificado antes do corte e uma rotina diária às 03:15 UTC, com retenção local de 14 dias. O arquivo de cron e o script estão em `deploy/`.
 

@@ -6,7 +6,7 @@ Migrar integralmente a aplicação legada para uma stack tipada e suportada para
 
 ## Estado atual
 
-As etapas de inventário, implementação, importação dos dados e publicação foram concluídas. `quadras.helioscreative.com.br` serve a nova stack React/Fastify/PostgreSQL. A stack SQLite legada segue ativa em standby durante a estabilização e não recebe tráfego público.
+As etapas de inventário, implementação, importação dos dados, publicação e estabilização foram concluídas. `quadras.helioscreative.com.br` serve a nova stack React/Fastify/PostgreSQL. O container legado foi parado; o container, o volume SQLite e o snapshot de pré-corte foram preservados para rollback.
 
 ## Etapas
 
@@ -17,9 +17,9 @@ As etapas de inventário, implementação, importação dos dados e publicação
 5. Portar a API e manter compatibilidade dos contratos e integrações.
 6. Ensaiar importação, autenticação, reservas, isolamento entre arenas, segurança e operação.
 7. Publicar a nova stack em `quadras.helioscreative.com.br`, preservando o serviço e os dados antigos para rollback. **Concluída.**
-8. Acompanhar a produção e remover a stack antiga somente depois do período de confiança. **Em estabilização; stack legada preservada.**
+8. Acompanhar a produção e retirar a stack antiga depois do período de confiança. **Concluída; container legado parado, dados preservados.**
 
-O responsável autorizou a execução contínua até a última etapa. O domínio e o volume SQLite não devem ser removidos durante a estabilização. A interrupção do serviço legado só ocorre depois da confirmação operacional da stack nova e de uma cópia de segurança restaurável.
+O responsável autorizou a execução contínua até a última etapa. O domínio e o volume SQLite não devem ser removidos durante a estabilização. O serviço legado foi parado após a confirmação operacional da stack nova e de cópias de segurança verificadas.
 
 ## Banco e segurança
 
