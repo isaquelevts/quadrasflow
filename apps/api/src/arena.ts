@@ -5,6 +5,7 @@ import { appAudit, blockedSlots, bookingEvents, bookings, clients, companies, co
 import { db } from './database.js';
 import type { AuthUser } from './auth.js';
 import { bookingAmountCents } from './pricing.js';
+import { findMonthlyConflict, monthlyConflictMessage } from './monthly-conflict.js';
 
 type AuthedRequest = FastifyRequest & { user: AuthUser | null };
 const fail = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
@@ -177,6 +178,8 @@ export async function registerArenaRoutes(app: FastifyInstance) {
       const conflict = await tx.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, courtId), ne(bookings.status, 'cancelled'), lt(bookings.startAt, endAt), sql`${bookings.endAt} > ${startAt}`)).limit(1);
       const block = await tx.select({ id: blockedSlots.id }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), lt(blockedSlots.startAt, endAt), sql`${blockedSlots.endAt} > ${startAt}`)).limit(1);
       if (conflict.length || block.length) throw fail(409, 'O horário escolhido já está ocupado ou bloqueado.');
+      const monthly = await findMonthlyConflict(tx, companyId, courtId, startAt, endAt);
+      if (monthly) throw fail(409, monthlyConflictMessage(monthly));
       const client = phone ? (await tx.select().from(clients).where(and(eq(clients.companyId, companyId), eq(clients.phone, phone))).orderBy(asc(clients.createdAt)).limit(1))[0] : (await tx.select().from(clients).where(and(eq(clients.companyId, companyId), eq(clients.name, customerName))).orderBy(asc(clients.createdAt)).limit(1))[0];
       const clientId = client?.id || randomUUID();
       if (client) await tx.update(clients).set({ name: customerName }).where(eq(clients.id, clientId)); else await tx.insert(clients).values({ id: clientId, companyId, name: customerName, phone: phone || null, createdAt });
@@ -208,6 +211,8 @@ export async function registerArenaRoutes(app: FastifyInstance) {
         tx.select({ id: blockedSlots.id }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), lt(blockedSlots.startAt, endAt), sql`${blockedSlots.endAt} > ${startAt}`)).limit(1),
       ]);
       if (conflict.length || block.length) throw fail(409, 'O horário escolhido já está ocupado ou bloqueado.');
+      const monthly = await findMonthlyConflict(tx, companyId, courtId, startAt, endAt);
+      if (monthly) throw fail(409, monthlyConflictMessage(monthly));
       const client = phone ? (await tx.select().from(clients).where(and(eq(clients.companyId, companyId), eq(clients.phone, phone))).orderBy(asc(clients.createdAt)).limit(1))[0] : (await tx.select().from(clients).where(and(eq(clients.companyId, companyId), eq(clients.name, customerName))).orderBy(asc(clients.createdAt)).limit(1))[0];
       const clientId = client?.id || randomUUID(), now = new Date().toISOString();
       if (client) await tx.update(clients).set({ name: customerName }).where(eq(clients.id, clientId)); else await tx.insert(clients).values({ id: clientId, companyId, name: customerName, phone: phone || null, createdAt: now });

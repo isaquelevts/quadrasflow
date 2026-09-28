@@ -75,9 +75,11 @@ export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initial
     const bookingHit = day.bookings.find((item) => item.court_id === courtId && item.status !== 'cancelled' && item.status !== 'monthly' && item.id !== booking?.id && overlaps(item.start_at, item.end_at));
     if (bookingHit) return { hard: true, text: `Conflito com reserva de ${bookingHit.customer_name} (${formatTime(bookingHit.start_at)}–${formatTime(bookingHit.end_at)}).` };
     const monthlyHit = day.bookings.find((item) => item.court_id === courtId && item.status === 'monthly' && overlaps(item.start_at, item.end_at));
-    if (monthlyHit) return { hard: false, text: `Atenção: horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
+    // Horário fixo de mensalista bloqueia como qualquer outra reserva (mesma regra da API e do bot).
+    if (monthlyHit && !isBlock) return { hard: true, text: `Conflito com o horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
+    if (monthlyHit) return { hard: false, text: `Atenção: este bloqueio cobre o horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
     return null;
-  }, [day, courtId, start, end, booking?.id]);
+  }, [day, courtId, start, end, booking?.id, isBlock]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError('');
