@@ -3,6 +3,7 @@ import { and, eq, gt } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { companies, sessions, users } from '@quadrasflow/database';
 import { db } from './database.js';
+import { isUniqueViolation } from './db-errors.js';
 
 export type AuthUser = { id: string; name: string; email: string; role: string; setupNeeded: boolean; company: { id: string; name: string; slug: string } | null };
 declare module 'fastify' {
@@ -76,7 +77,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
         await tx.insert(users).values({ id: userId, companyId, name, email, passwordHash, passwordSalt: salt, role: 'arena_admin', active: true, createdAt });
       });
     } catch (cause) {
-      if (cause && typeof cause === 'object' && 'code' in cause && cause.code === '23505') throw Object.assign(new Error('Esse e-mail ou identificador já está cadastrado.'), { statusCode: 409 });
+      if (isUniqueViolation(cause)) throw Object.assign(new Error('Esse e-mail ou identificador já está cadastrado.'), { statusCode: 409 });
       throw cause;
     }
     await createSession(userId, reply);
