@@ -27,6 +27,7 @@ Plataforma multiempresa para operação de arenas esportivas. A aplicação foi 
 - `packages/database`: schema Drizzle, migrations e ferramentas SQLite/PostgreSQL.
 - `deploy/compose.staging.yaml`: ambiente isolado de desenvolvimento e ensaio.
 - `deploy/compose.cutover.yaml`: serviços web/API da stack de produção, ligados à rede e ao PostgreSQL preparado para o corte.
+- `GITHUB-DEPLOY.md`: configuração do GitHub Actions, secrets e fluxo de publicação automática na VPS.
 - `MIGRATION.md`: sequência de migração e procedimento de retorno.
 
 ## Desenvolvimento
@@ -58,8 +59,10 @@ Não execute ferramentas de importação ou exportação com dados reais em ambi
 
 ## Produção
 
-A aplicação está publicada em `https://quadras.helioscreative.com.br`. O contêiner legado foi parado após a estabilização; seu volume SQLite e o snapshot pré-corte permanecem preservados para rollback. O banco PostgreSQL não é compartilhado com outros produtos da VPS.
+A aplicação está publicada em `https://quadrasflow.com.br`. O endereço anterior redireciona para o domínio oficial. O contêiner legado foi parado após a estabilização; seu volume SQLite e o snapshot pré-corte permanecem preservados para rollback. O banco PostgreSQL não é compartilhado com outros produtos da VPS.
 
-O snapshot SQLite pré-corte está em `/opt/quadrasflow/backups`. Há um backup PostgreSQL verificado antes do corte e uma rotina diária às 03:15 UTC, com retenção local de 14 dias. O arquivo de cron e o script estão em `deploy/`.
+O snapshot SQLite pré-corte está em `/opt/quadrasflow/backups`. Há backups verificados do PostgreSQL e das imagens enviadas em `/opt/quadrasflow/backups`, gerados diariamente às 03:15 UTC e mantidos por 14 dias. O arquivo de cron e o script estão em `deploy/`.
 
-As credenciais de WAHA e Mercado Pago não estavam configuradas no app anterior quando o inventário foi feito; esses serviços continuam desconectados até o administrador cadastrar as credenciais necessárias.
+O QuadrasFlow precisa de uma instância WAHA própria. Configure `WAHA_BASE_URL=http://waha:3000`, `WAHA_API_KEY`, `WAHA_WEBHOOK_SECRET`, `APP_BASE_URL` e `OPENAI_API_KEY` no ambiente seguro da API. Crie também `deploy/waha.production.env` a partir de `deploy/waha.production.env.example`, usando o mesmo `WAHA_API_KEY`; esse arquivo contém apenas a chave do WAHA e não deve ser versionado. A stack dedicada usa armazenamento próprio para sessão e mídia, sem compartilhar a sessão do OdontoCRM.
+
+Mercado Pago continua dependendo de credenciais OAuth e de webhook configurados separadamente.

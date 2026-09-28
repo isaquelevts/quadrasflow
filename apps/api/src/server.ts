@@ -1,3 +1,5 @@
+import {registerWhatsAppServiceRoutes} from './whatsapp-services.js';
+import {processWhatsAppDeliveries} from './whatsapp-delivery-worker.js';
 import Fastify from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
@@ -13,7 +15,8 @@ import { registerPublicRoutes } from './public.js';
 import { registerWhatsAppRoutes } from './whatsapp.js';
 import { registerPlatformRoutes } from './platform.js';
 import { registerUserRoutes } from './users.js';
-import { registerMercadoPagoRoutes } from './mercadopago.js';
+import { processExpiredWhatsAppPix, processWhatsAppPixReminders, registerMercadoPagoRoutes } from './mercadopago.js';
+import { registerMediaRoutes } from './media.js';
 
 const app = Fastify({
   logger: {
@@ -29,6 +32,8 @@ const app = Fastify({
   requestIdHeader: 'x-request-id',
   bodyLimit: 1_000_000,
 }).withTypeProvider<TypeBoxTypeProvider>();
+
+app.addContentTypeParser('image/webp', { parseAs: 'buffer', bodyLimit: 6 * 1024 * 1024 }, (_request, body, done) => done(null, body));
 
 await app.register(rateLimit, { max: 300, timeWindow: '1 minute' });
 await app.register(swagger, {
@@ -47,16 +52,22 @@ app.get('/api/v1/health', {
 }, async () => ({ ok: true as const, service: 'quadrasflow-api', version: '1.0.0' }));
 
 app.get('/api/health', async () => ({ ok: true as const }));
+const whatsappReminderTimer=setInterval(()=>{void Promise.all([processWhatsAppPixReminders(),processExpiredWhatsAppPix()]).catch(error=>app.log.error({err:error},'Falha ao processar lembretes e Pix expirados do WhatsApp'));},60_000);
+whatsappReminderTimer.unref();
 await registerAuthRoutes(app);
+await registerMediaRoutes(app);
 await registerArenaRoutes(app);
 await registerFinanceMonthlyRoutes(app);
 await registerTournamentRoutes(app);
 await registerPublicRoutes(app);
 await registerWhatsAppRoutes(app);
+await registerWhatsAppServiceRoutes(app);
+const deliveryTimer=setInterval(()=>void processWhatsAppDeliveries().catch(error=>app.log.error({err:error},'Falha nos envios do WhatsApp')),15_000);
+deliveryTimer.unref();
 await registerPlatformRoutes(app);
 await registerUserRoutes(app);
 await registerMercadoPagoRoutes(app);
-app.addHook('onClose', async () => { await databaseClient.end({ timeout: 5 }); });
+app.addHook('onClose', async () => { clearInterval(whatsappReminderTimer); clearInterval(deliveryTimer); await databaseClient.end({ timeout: 5 }); });
 
 app.setErrorHandler((error, request, reply) => {
   request.log.error({ err: error }, 'Request failed');

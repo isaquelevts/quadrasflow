@@ -15,6 +15,20 @@
       "when": 1790382141971,
       "tag": "0001_gigantic_bucky",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790433941950,
+      "tag": "0002_complete_kylun",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790619643066,
+      "tag": "0003_sour_franklin_richards",
+      "breakpoints": true
     }
   ]
 }

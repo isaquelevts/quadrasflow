@@ -1,0 +1,1 @@
+ALTER TABLE "courts" ADD COLUMN "photo_url" text;

@@ -6,6 +6,7 @@ dist/
 !.env.next.example
 deploy/staging.env
 deploy/production.env
+deploy/waha.production.env
 coverage/
 *.tsbuildinfo
 .DS_Store

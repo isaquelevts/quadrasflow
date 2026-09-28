@@ -8,17 +8,20 @@ import { bookingAmountCents } from './pricing.js';
 
 type AuthedRequest = FastifyRequest & { user: AuthUser | null };
 const fail = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
+const brazilianUfs = new Set(['AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MT', 'MS', 'MG', 'PA', 'PB', 'PR', 'PE', 'PI', 'RJ', 'RN', 'RS', 'RO', 'RR', 'SC', 'SP', 'SE', 'TO']);
 const bodyOf = (request: FastifyRequest) => (request.body || {}) as Record<string, unknown>;
 const userOf = (request: FastifyRequest) => { const user = (request as AuthedRequest).user; if (!user) throw fail(401, 'Entre na sua conta para continuar.'); return user; };
 const companyOf = (request: FastifyRequest, allowSetup = false) => { const user = userOf(request); if (!user.company) throw fail(403, 'Esta conta não pertence a uma arena.'); if (user.setupNeeded && !allowSetup) throw fail(403, 'O administrador precisa concluir a configuração inicial da arena.'); return user.company.id; };
 const adminOf = (request: FastifyRequest) => { const user = userOf(request); if (user.role !== 'arena_admin') throw fail(403, 'Somente o administrador da arena pode fazer isso.'); return user; };
 function text(value: unknown, label: string, min = 2, max = 100) { const result = String(value ?? '').trim(); if (result.length < min || result.length > max) throw fail(400, `Confira ${label}.`); return result; }
 function digits(value: unknown) { return String(value ?? '').replace(/\D/g, ''); }
+function validBrazilianUf(value: unknown) { return brazilianUfs.has(String(value ?? '').trim().toUpperCase()); }
+function validImageReference(value: string) { return /^https:\/\//i.test(value) || /^\/api\/arena\/media\/[a-f0-9]{32}\/[a-f0-9-]{36}\.webp$/.test(value); }
 function validDay(value: unknown): string { const day = String(value ?? ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(`${day}T12:00:00Z`))) throw fail(400, 'Data inválida.'); return day; }
 function iso(value: unknown) { const date = new Date(String(value ?? '')); if (Number.isNaN(date.valueOf())) throw fail(400, 'Confira a data e o horário.'); return date.toISOString(); }
 function spDay(date = new Date()) { return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(date); }
 function toClient(row: typeof clients.$inferSelect) { return { id: row.id, name: row.name, phone: row.phone, created_at: row.createdAt }; }
-function toCourt(row: typeof courts.$inferSelect) { return { id: row.id, name: row.name, sport: row.sport, price_cents: row.priceCents, active: row.active ? 1 : 0 }; }
+function toCourt(row: typeof courts.$inferSelect) { return { id: row.id, name: row.name, sport: row.sport, price_cents: row.priceCents, photo_url: row.photoUrl, active: row.active ? 1 : 0 }; }
 function toHour(row: typeof companyHours.$inferSelect) { return { weekday: row.weekday, is_open: row.isOpen ? 1 : 0, open_time: row.openTime, close_time: row.closeTime }; }
 async function audit(companyId: string, userId: string, action: string, entity: string, entityId?: string, details: Record<string, unknown> = {}) { await db.insert(appAudit).values({ id: randomUUID(), companyId, userId, action, entity, entityId: entityId || null, details, createdAt: new Date().toISOString() }); }
 async function getCompanyHours(companyId: string) { return db.select().from(companyHours).where(eq(companyHours.companyId, companyId)).orderBy(asc(companyHours.weekday)); }
@@ -44,10 +47,10 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const normalizedHours = hoursDraft.map((h) => { const weekday = Number(h.weekday), openTime = String(h.openTime || ''), closeTime = String(h.closeTime || ''), isOpen = h.isOpen === true; if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6 || !/^([01]\d|2[0-3]):(00|30)$/.test(openTime) || !/^([01]\d|2[0-3]):(00|30)$/.test(closeTime) || (isOpen && closeTime <= openTime)) throw fail(400, 'Confira os horários de funcionamento.'); return { weekday, openTime, closeTime, isOpen }; });
     if (new Set(normalizedHours.map((h) => h.weekday)).size !== 7 || !normalizedHours.some((h) => h.isOpen)) throw fail(400, 'Selecione pelo menos um dia aberto para a arena.');
     const phone = digits(company.phone), zip = digits(company.zipCode), cancellationHours = Number(company.cancellationHours), cancellationFeePercent = Number(company.cancellationFeePercent);
-    if (phone.length < 10 || phone.length > 15 || zip.length !== 8 || !/^[A-Z]{2}$/i.test(String(company.state || '')) || !Number.isInteger(cancellationHours) || cancellationHours < 0 || cancellationHours > 48 || !Number.isInteger(cancellationFeePercent) || cancellationFeePercent < 0 || cancellationFeePercent > 20) throw fail(400, 'Confira o telefone, endereço e as políticas da arena.');
+    if (phone.length < 10 || phone.length > 15 || zip.length !== 8 || !validBrazilianUf(company.state) || !Number.isInteger(cancellationHours) || cancellationHours < 0 || cancellationHours > 48 || !Number.isInteger(cancellationFeePercent) || cancellationFeePercent < 0 || cancellationFeePercent > 20) throw fail(400, 'Confira o telefone, endereço, UF e as políticas da arena.');
     const photos = Array.isArray(company.photos) ? company.photos.map(String).filter(Boolean).slice(0, 6) : [];
     const logoUrl = String(company.logoUrl || '');
-    if ((logoUrl && !/^https:\/\//i.test(logoUrl)) || photos.some((url) => !/^https:\/\//i.test(url))) throw fail(400, 'Use apenas imagens com endereço HTTPS.');
+    if ((logoUrl && !validImageReference(logoUrl)) || photos.some((url) => !validImageReference(url))) throw fail(400, 'Selecione imagens enviadas ou use endereços HTTPS.');
     const bands = [{ band: 'morning', startTime: '08:00', endTime: '12:00' }, { band: 'afternoon', startTime: '12:00', endTime: '18:00' }, { band: 'evening', startTime: '18:00', endTime: '23:00' }];
     const priceRows = prices.flatMap((p) => bands.map(({ band, startTime, endTime }) => ({ weekday: Number(p.weekday), band, startTime, endTime, priceCents: Math.round(Number(p[band])) })));
     if (priceRows.length !== 21 || priceRows.some((p) => !Number.isInteger(p.weekday) || p.weekday < 0 || p.weekday > 6 || !Number.isInteger(p.priceCents) || p.priceCents < 2000 || p.priceCents > 100000000)) throw fail(400, 'Os preços devem ser de pelo menos R$ 20 por hora nos sete dias.');
@@ -94,21 +97,43 @@ export async function registerArenaRoutes(app: FastifyInstance) {
   });
   app.put('/api/arena/profile', auth, async (request) => {
     const user = adminOf(request), companyId = companyOf(request), profile = (bodyOf(request).profile || {}) as Record<string, unknown>;
-    const amenities = Array.isArray(profile.amenities) ? profile.amenities.map(String).filter(Boolean).slice(0, 20) : [], photos = Array.isArray(profile.photos) ? profile.photos.map(String).filter(Boolean).slice(0, 6) : [];
-    if (String(profile.description || '').length > 600 || String(profile.address || '').length > 180 || String(profile.city || '').length > 100 || String(profile.state || '').length > 2 || amenities.some((x) => x.length > 60) || photos.some((x) => !/^https:\/\//i.test(x) || x.length > 1000)) throw fail(400, 'Confira os limites do perfil e use links de imagem HTTPS.');
+    const state = String(profile.state || '').trim().toUpperCase(), amenities = Array.isArray(profile.amenities) ? profile.amenities.map(String).filter(Boolean).slice(0, 20) : [], photos = Array.isArray(profile.photos) ? profile.photos.map(String).filter(Boolean).slice(0, 6) : [];
+    if (String(profile.description || '').length > 600 || String(profile.address || '').length > 180 || String(profile.city || '').length > 100 || (state && !validBrazilianUf(state)) || amenities.some((x) => x.length > 60) || photos.some((x) => !validImageReference(x) || x.length > 1000)) throw fail(400, 'Confira os limites do perfil, a UF e as imagens selecionadas.');
     const opts = (profile.options || {}) as Record<string, unknown>, options = Object.fromEntries(['description', 'address', 'amenities', 'photos', 'hours', 'prices'].map((key) => [key, opts[key] !== false]));
-    await db.update(companies).set({ description: String(profile.description || '').trim(), address: String(profile.address || '').trim(), city: String(profile.city || '').trim(), state: String(profile.state || '').trim().toUpperCase(), amenities, photos, publicOptions: options }).where(eq(companies.id, companyId));
+    await db.update(companies).set({ description: String(profile.description || '').trim(), address: String(profile.address || '').trim(), city: String(profile.city || '').trim(), state, amenities, photos, publicOptions: sql`${companies.publicOptions} || ${JSON.stringify(options)}::jsonb` }).where(eq(companies.id, companyId));
     await audit(companyId, user.id, 'arena.profile_updated', 'company', companyId);
-    return { profile: { description: String(profile.description || ''), address: String(profile.address || ''), city: String(profile.city || ''), state: String(profile.state || '').toUpperCase(), amenities, photos, options } };
+    return { profile: { description: String(profile.description || ''), address: String(profile.address || ''), city: String(profile.city || ''), state, amenities, photos, options } };
   });
   app.get('/api/courts', auth, async (request) => ({ courts: (await db.select().from(courts).where(eq(courts.companyId, companyOf(request))).orderBy(asc(courts.name))).map(toCourt) }));
   app.post('/api/courts', auth, async (request, reply) => {
     const user = adminOf(request), companyId = companyOf(request), body = bodyOf(request), name = text(body.name, 'o nome da quadra'), sport = text(body.sport, 'a modalidade'), priceCents = Math.round(Number(body.priceCents));
     if (!Number.isInteger(priceCents) || priceCents < 0 || priceCents > 100000000) throw fail(400, 'Confira o preço por hora.');
-    const row = { id: randomUUID(), companyId, name, sport, priceCents, surface: '', covering: '', players: 0, sports: [sport], active: true, createdAt: new Date().toISOString() };
+    const photoUrl = String(body.photoUrl || '');
+    const photoFolder = createHash('sha256').update(companyId).digest('hex').slice(0, 32);
+    if (photoUrl && !new RegExp(`^/api/arena/media/${photoFolder}/[a-f0-9-]{36}\\.webp$`).test(photoUrl)) throw fail(400, 'Envie uma foto da quadra pela galeria de imagens.');
+    const row = { id: randomUUID(), companyId, name, sport, priceCents, photoUrl: photoUrl || null, photos: photoUrl ? [photoUrl] : [], surface: '', covering: '', players: 0, sports: [sport], active: true, createdAt: new Date().toISOString() };
     try { await db.insert(courts).values(row); } catch (cause) { if ((cause as { code?: string }).code === '23505') throw fail(409, 'Já existe uma quadra com esse nome.'); throw cause; }
     await audit(companyId, user.id, 'court.created', 'court', row.id);
     return reply.code(201).send({ court: toCourt(row) });
+  });
+  app.put<{ Params: { id: string } }>('/api/courts/:id', auth, async (request) => {
+    const user = adminOf(request), companyId = companyOf(request), body = bodyOf(request), { id } = request.params;
+    const current = (await db.select().from(courts).where(and(eq(courts.id, id), eq(courts.companyId, companyId))).limit(1))[0];
+    if (!current) throw fail(404, 'Quadra não encontrada.');
+    const name = text(body.name, 'o nome da quadra'), sport = text(body.sport, 'a modalidade'), priceCents = Math.round(Number(body.priceCents));
+    if (!Number.isInteger(priceCents) || priceCents < 0 || priceCents > 100000000) throw fail(400, 'Confira o preço por hora.');
+    const photoUrl = String(body.photoUrl || ''), photoFolder = createHash('sha256').update(companyId).digest('hex').slice(0, 32);
+    if (photoUrl && !new RegExp(`^/api/arena/media/${photoFolder}/[a-f0-9-]{36}\\.webp$`).test(photoUrl)) throw fail(400, 'Envie uma foto da quadra pela galeria de imagens.');
+    const sports = [sport, ...current.sports.filter((item) => item !== current.sport && item !== sport)];
+    try {
+      const rows = await db.update(courts).set({ name, sport, sports, priceCents, photoUrl: photoUrl || null, photos: photoUrl===current.photoUrl?current.photos:[...(photoUrl?[photoUrl]:[]),...current.photos.filter(url=>url!==current.photoUrl&&url!==photoUrl)].slice(0,6) }).where(and(eq(courts.id, id), eq(courts.companyId, companyId))).returning();
+      if (!rows[0]) throw fail(404, 'Quadra não encontrada.');
+      await audit(companyId, user.id, 'court.updated', 'court', id);
+      return { court: toCourt(rows[0]) };
+    } catch (cause) {
+      if (cause && typeof cause === 'object' && 'code' in cause && cause.code === '23505') throw fail(409, 'Já existe uma quadra com esse nome.');
+      throw cause;
+    }
   });
   app.get('/api/clients', auth, async (request) => {
     const companyId = companyOf(request), [clientRows, bookingRows] = await Promise.all([db.select().from(clients).where(eq(clients.companyId, companyId)).orderBy(asc(clients.name)), db.select({ clientId: bookings.clientId, startAt: bookings.startAt }).from(bookings).where(and(eq(bookings.companyId, companyId), ne(bookings.status, 'cancelled')))]);
@@ -125,11 +150,11 @@ export async function registerArenaRoutes(app: FastifyInstance) {
 
   app.get('/api/dashboard', auth, async (request) => {
     const companyId = companyOf(request), query = request.query as { date?: string }, day = validDay(query.date || spDay()), start = new Date(`${day}T12:00:00Z`); start.setUTCDate(start.getUTCDate() - 6); const from = start.toISOString().slice(0, 10);
-    const [bookingRows, courtRows] = await Promise.all([db.select().from(bookings).where(and(eq(bookings.companyId, companyId), gte(bookings.startAt, `${from}T00:00:00.000Z`), lt(bookings.startAt, `${day}T24:00:00.000Z`))), db.select().from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true)))]);
+    const [bookingRows, courtRows, pendingRows] = await Promise.all([db.select().from(bookings).where(and(eq(bookings.companyId, companyId), gte(bookings.startAt, `${from}T00:00:00.000Z`), lt(bookings.startAt, `${day}T24:00:00.000Z`))), db.select().from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))), db.select({id:bookings.id,customerName:bookings.customerName,startAt:bookings.startAt,amountCents:bookings.amountCents,courtName:courts.name}).from(bookings).innerJoin(courts,eq(bookings.courtId,courts.id)).where(and(eq(bookings.companyId,companyId),eq(bookings.status,'pending'))).orderBy(asc(bookings.startAt))]);
     const current = bookingRows.filter((b) => b.startAt.slice(0, 10) === day && b.status !== 'cancelled');
     const week = Array.from({ length: 7 }, (_, i) => { const d = new Date(start); d.setUTCDate(d.getUTCDate() + i); const key = d.toISOString().slice(0, 10), list = bookingRows.filter((b) => b.startAt.slice(0, 10) === key && b.status !== 'cancelled'); return { date: key, count: list.length, reserved_cents: list.reduce((sum, b) => sum + b.amountCents, 0) }; });
     const comp = (await db.select({ id: companies.id, name: companies.name, slug: companies.slug }).from(companies).where(eq(companies.id, companyId)).limit(1))[0]!;
-    return { company: comp, today: { bookings_count: current.length, reserved_cents: current.reduce((sum, b) => sum + b.amountCents, 0), pending_count: current.filter((b) => b.status === 'pending').length, courts_active: courtRows.length }, week };
+    return { company: comp, today: { bookings_count: current.length, reserved_cents: current.reduce((sum, b) => sum + b.amountCents, 0), pending_count: current.filter((b) => b.status === 'pending').length, courts_active: courtRows.length }, pending: { count: pendingRows.length, bookings: pendingRows.slice(0, 10) }, week };
   });
   app.get('/api/bookings', auth, async (request) => {
     const companyId = companyOf(request), query = request.query as { date?: string }, day = validDay(query.date || spDay());
@@ -220,19 +245,8 @@ export async function registerArenaRoutes(app: FastifyInstance) {
       reviewToken = randomBytes(32).toString('base64url');
       const now = new Date();
       await db.insert(reviewLinks).values({ id: randomUUID(), companyId, bookingId: id, tokenHash: createHash('sha256').update(reviewToken).digest('hex'), expiresAt: new Date(now.getTime() + 90 * 86400000).toISOString(), submittedAt: null, createdAt: now.toISOString() }).onConflictDoNothing();
-      const joined = (await db.select({ phone: bookings.customerPhone, arena: companies.name, slug: companies.slug }).from(bookings).innerJoin(companies, eq(bookings.companyId, companies.id)).where(and(eq(bookings.id, id), eq(bookings.companyId, companyId))).limit(1))[0];
-      const integration = (await db.select().from(integrationSettings).where(and(eq(integrationSettings.companyId, companyId), eq(integrationSettings.provider, 'waha'))).limit(1))[0];
-      const config = (integration?.settings || {}) as { enabled?: boolean; session?: string };
-      const phone = digits(joined?.phone);
-      if (phone.length >= 10 && config.enabled && config.session && process.env.WAHA_BASE_URL && process.env.WAHA_API_KEY && process.env.APP_BASE_URL) {
-        try {
-          const custom = (await db.select().from(messageTemplates).where(and(eq(messageTemplates.companyId, companyId), eq(messageTemplates.category, 'avaliacao'), eq(messageTemplates.active, true))).orderBy(desc(messageTemplates.createdAt)).limit(1))[0];
-          const url = `${process.env.APP_BASE_URL.replace(/\/$/, '')}/a/${joined!.slug}?avaliar=${encodeURIComponent(reviewToken)}`;
-          const message = String(custom?.body || 'Como foi sua experiência na {arena_name}? Avalie aqui: {review_link}').replace(/\{([a-z_]+)\}/gi, (match, key: string) => key === 'arena_name' ? joined!.arena : key === 'review_link' ? url : match);
-          const response = await fetch(`${process.env.WAHA_BASE_URL.replace(/\/$/, '')}/api/sendText`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': process.env.WAHA_API_KEY }, body: JSON.stringify({ chatId: `${phone}@c.us`, text: message, session: config.session }), signal: AbortSignal.timeout(8000) });
-          if (!response.ok) request.log.warn({ companyId }, 'O pedido de avaliação não foi enviado pelo WAHA.');
-        } catch { request.log.warn({ companyId }, 'O pedido de avaliação não foi enviado pelo WAHA.'); }
-      }
+      // Review delivery is scheduled after the booking ends by the durable worker.
+
     }
     return { ok: true, status, reviewToken };
   });

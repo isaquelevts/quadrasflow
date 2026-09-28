@@ -65,7 +65,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
   });
   app.post('/api/auth/register', { config: { rateLimit: { max: 5, timeWindow: 60 * 60 * 1000 } } }, async (request, reply) => {
     const body = bodyOf(request), arenaName = safeText(body.arenaName, 'o nome da arena'), name = safeText(body.adminName, 'seu nome'), email = safeEmail(body.email), password = String(body.password ?? ''), phone = String(body.phone ?? '').replace(/\D/g, '');
-    if (password.length < 14 || password.length > 200) throw Object.assign(new Error('A senha precisa ter pelo menos 14 caracteres.'), { statusCode: 400 });
+    if (password.length < 8 || password.length > 200) throw Object.assign(new Error('A senha precisa ter pelo menos 8 caracteres.'), { statusCode: 400 });
     if (phone.length < 10 || phone.length > 15) throw Object.assign(new Error('Informe um telefone com DDD.'), { statusCode: 400 });
     const slug = String(body.slug || arenaName).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50);
     if (!slug) throw Object.assign(new Error('Informe um identificador válido para sua arena.'), { statusCode: 400 });

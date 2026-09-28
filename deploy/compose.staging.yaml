@@ -27,6 +27,9 @@ services:
       NODE_ENV: production
       API_HOST: 0.0.0.0
       API_PORT: 3000
+      ARENA_MEDIA_DIR: /data/media
+    volumes:
+      - quadrasflow_media:/data/media
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -73,3 +76,4 @@ networks:
 
 volumes:
   quadrasflow_next_pg18data:
+  quadrasflow_media:

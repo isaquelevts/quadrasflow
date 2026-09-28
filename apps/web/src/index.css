@@ -6,6 +6,8 @@
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-muted: var(--muted);
@@ -26,6 +28,8 @@
   --foreground: #18231f;
   --card: #ffffff;
   --card-foreground: #18231f;
+  --popover: #ffffff;
+  --popover-foreground: #18231f;
   --primary: #103e35;
   --primary-foreground: #ffffff;
   --muted: #edf2ee;
@@ -41,3 +45,10 @@
 * { box-sizing: border-box; }
 body { min-width: 320px; min-height: 100vh; margin: 0; background: var(--background); }
 button, input, select, textarea { font: inherit; }
+
+@media (max-width: 639px) {
+  [data-slot="button"][data-size="default"],
+  [data-slot="button"][data-size="sm"],
+  [data-slot="input"],
+  [data-slot="select-trigger"] { min-height: 44px; }
+}

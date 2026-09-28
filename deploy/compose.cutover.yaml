@@ -31,6 +31,7 @@ services:
     networks: [private]
 
   api:
+    image: ghcr.io/isaquelevts/quadrasflow-api:${QUADRASFLOW_RELEASE_TAG:-main}
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
@@ -40,6 +41,11 @@ services:
       NODE_ENV: production
       API_HOST: 0.0.0.0
       API_PORT: 3000
+      ARENA_MEDIA_DIR: /data/media
+      WAHA_BASE_URL: http://waha:3000
+      WAHA_WEBHOOK_BASE_URL: http://quadrasflow-cutover-api:3000
+    volumes:
+      - quadrasflow_media:/data/media
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -54,7 +60,25 @@ services:
       retries: 3
       start_period: 15s
 
+  waha:
+    image: devlikeapro/waha:latest-2026.9.1@sha256:41283bd89922ec3f722e5a772b844c451634d4aa72e9c34043c3480184f970fe
+    restart: unless-stopped
+    env_file: ./waha.production.env
+    environment:
+      WAHA_BASE_URL: http://waha:3000
+      WHATSAPP_DEFAULT_ENGINE: WEBJS
+      WAHA_DASHBOARD_ENABLED: "false"
+      WHATSAPP_SWAGGER_ENABLED: "false"
+      WHATSAPP_FILES_FOLDER: /app/.media
+    volumes:
+      - quadrasflow_waha_sessions:/app/.sessions
+      - quadrasflow_waha_media:/app/.media
+    networks:
+      private: {}
+      app: {}
+
   web:
+    image: ghcr.io/isaquelevts/quadrasflow-web:${QUADRASFLOW_RELEASE_TAG:-main}
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
@@ -83,3 +107,8 @@ networks:
 
 volumes:
   quadrasflow_next_pg18data:
+  quadrasflow_waha_sessions:
+  quadrasflow_waha_media:
+  quadrasflow_media:
+    external: true
+    name: quadrasflow-cutover_quadrasflow_media
