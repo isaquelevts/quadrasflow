@@ -1,0 +1,114 @@
+name: quadrasflow-cutover
+
+services:
+  database:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    env_file: ./staging.env
+    environment:
+      POSTGRES_DB: quadrasflow
+    volumes:
+      - quadrasflow_next_pg18data:/var/lib/postgresql
+    networks: [private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+      target: build
+    command: ["npm", "run", "db:migrate", "--workspace", "@quadrasflow/database"]
+    restart: "no"
+    env_file: ./production.env
+    depends_on:
+      database:
+        condition: service_healthy
+    networks: [private]
+
+  api:
+    image: ghcr.io/isaquelevts/quadrasflow-api:${QUADRASFLOW_RELEASE_TAG:-main}
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file: ./production.env
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: 3000
+      ARENA_MEDIA_DIR: /data/media
+      WAHA_BASE_URL: http://waha:3000
+      WAHA_WEBHOOK_BASE_URL: http://quadrasflow-cutover-api:3000
+    volumes:
+      - quadrasflow_media:/data/media
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      private: {}
+      app:
+        aliases: [quadrasflow-cutover-api]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  waha:
+    image: devlikeapro/waha:latest-2026.9.1@sha256:41283bd89922ec3f722e5a772b844c451634d4aa72e9c34043c3480184f970fe
+    restart: unless-stopped
+    env_file: ./waha.production.env
+    environment:
+      WAHA_BASE_URL: http://waha:3000
+      WHATSAPP_DEFAULT_ENGINE: WEBJS
+      WAHA_DASHBOARD_ENABLED: "false"
+      WHATSAPP_SWAGGER_ENABLED: "false"
+      WHATSAPP_FILES_FOLDER: /app/.media
+    volumes:
+      - quadrasflow_waha_sessions:/app/.sessions
+      - quadrasflow_waha_media:/app/.media
+    networks:
+      private: {}
+      app: {}
+
+  web:
+    image: ghcr.io/isaquelevts/quadrasflow-web:${QUADRASFLOW_RELEASE_TAG:-main}
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        API_UPSTREAM: quadrasflow-cutover-api
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      app: {}
+      easypanel:
+        aliases: [quadrasflow-new-web]
+    labels:
+      traefik.enable: "false"
+
+networks:
+  private:
+    internal: true
+  app:
+    external: true
+    name: quadrasflow-cutover_app
+  easypanel:
+    external: true
+    name: easypanel
+
+volumes:
+  quadrasflow_next_pg18data:
+  quadrasflow_waha_sessions:
+  quadrasflow_waha_media:
+  quadrasflow_media:
+    external: true
+    name: quadrasflow-cutover_quadrasflow_media
