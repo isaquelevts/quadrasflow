@@ -1,208 +1,279 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { LoaderCircle, Plus } from 'lucide-react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { CalendarDays, ChevronLeft, ChevronRight, CircleCheck, CircleX, Clock, Hourglass, Info, LandPlot, LoaderCircle, Pause, Play, Plus, Receipt, Repeat, TrendingUp } from 'lucide-react';
+import { addMonths, format, parseISO } from 'date-fns';
+import { ptBR } from 'date-fns/locale';
+import { toast } from 'sonner';
+import { Avatar, EmptyState, PageHeader, Panel, Segmented, StatCard } from '@/components/app/page';
+import { ResponsiveSheet } from '@/components/app/ResponsiveSheet';
+import { usePrimaryAction } from '@/components/app/shell-context';
+import { ToneBadge, type Tone } from '@/components/app/status';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { api } from '@/lib/api';
-import { errorMessage, formatCurrency, formatDate } from '@/lib/format';
+import { isActiveCourt, todayKey, type Court } from '@/lib/arena';
+import { durationLabel, errorMessage, formatCurrency, formatPhone, minutesOfTime, plural, timeOfMinutes } from '@/lib/format';
+import { cn } from '@/lib/utils';
 
 type Client = { id: string; name: string; phone: string | null };
-type Court = { id: string; name: string; sport: string };
-type Member = { id: string; client_name: string; court_name: string; weekday: number; start_time: string; duration_minutes: number; amount_cents: number; status: string };
-type Charge = { id: string; client_name: string; court_name: string; cycle: string; amount_cents: number; due_date: string; paid_at: string | null };
+type Member = { id: string; client_name: string; phone: string | null; court_name: string; weekday: number; start_time: string; duration_minutes: number; amount_cents: number; status: 'active' | 'paused' | 'ended'; created_at: string };
+type Charge = { id: string; memberId: string; client_name: string; court_name: string; cycle: string; amount_cents: number; due_date: string; paid_at: string | null };
 
-const days = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
-const times = Array.from({ length: 36 }, (_, index) => `${String(6 + Math.floor(index / 2)).padStart(2, '0')}:${index % 2 ? '30' : '00'}`);
+const DAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+const everyDay = (weekday: number) => weekday === 0 || weekday === 6 ? `Todo ${DAYS[weekday].toLowerCase()}` : `Toda ${DAYS[weekday].toLowerCase()}-feira`;
+const plDay = (weekday: number, n: number) => `${n} ${n === 1 ? DAYS[weekday].toLowerCase() : `${DAYS[weekday].toLowerCase()}s`}`;
+const MEMBER: Record<Member['status'], { label: string; tone: Tone }> = { active: { label: 'Ativo', tone: 'green' }, paused: { label: 'Pausado', tone: 'gray' }, ended: { label: 'Encerrado', tone: 'rose' } };
+const cycleOf = (date: Date) => format(date, 'yyyy-MM');
+const monthDate = (cycle: string) => parseISO(`${cycle}-01T12:00:00`);
+const monthLabel = (cycle: string, pattern = "MMMM 'de' yyyy") => format(monthDate(cycle), pattern, { locale: ptBR });
+
+/** Datas (AAAA-MM-DD) do mês que caem no dia da semana. */
+function datesIn(cycle: string, weekday: number) {
+  const out: string[] = [];
+  const d = monthDate(cycle);
+  for (let day = 1; day <= 31; day += 1) {
+    const current = new Date(d.getFullYear(), d.getMonth(), day, 12);
+    if (current.getMonth() !== d.getMonth()) break;
+    if (current.getDay() === weekday) out.push(format(current, 'yyyy-MM-dd'));
+  }
+  return out;
+}
+const chargeStatus = (charge: Charge): { label: string; tone: Tone } => charge.paid_at ? { label: 'Pago', tone: 'green' } : charge.due_date < todayKey() ? { label: 'Atrasada', tone: 'rose' } : { label: 'Pendente', tone: 'amber' };
+
+type Confirm = { title: string; text: string; action: string; danger?: boolean; run: () => Promise<void> } | null;
 
 export function MonthlyMembersPage() {
-  const today = new Date();
-  const [cycle, setCycle] = useState(`${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`);
+  const [cycle, setCycle] = useState(cycleOf(new Date()));
   const [members, setMembers] = useState<Member[]>([]);
   const [charges, setCharges] = useState<Charge[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [courts, setCourts] = useState<Court[]>([]);
-  const [open, setOpen] = useState(false);
-  const [clientMode, setClientMode] = useState<'existing' | 'new'>('existing');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [formError, setFormError] = useState('');
-  const [formNotice, setFormNotice] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [clientId, setClientId] = useState('');
-  const [clientName, setClientName] = useState('');
-  const [clientPhone, setClientPhone] = useState('');
-  const [courtId, setCourtId] = useState('');
-  const [weekday, setWeekday] = useState('1');
-  const [startTime, setStartTime] = useState('19:00');
-  const [duration, setDuration] = useState('60');
-  const [amount, setAmount] = useState('');
+  const [formOpen, setFormOpen] = useState(false);
+  const [showEnded, setShowEnded] = useState(false);
+  const [confirm, setConfirm] = useState<Confirm>(null);
+  const [busy, setBusy] = useState(false);
+
+  usePrimaryAction(() => setFormOpen(true));
 
   async function load() {
-    setLoading(true);
+    setLoading(true); setError('');
     try {
       const [memberData, courtData, clientData] = await Promise.all([
         api<{ members: Member[]; charges: Charge[] }>(`/api/monthly-members?cycle=${cycle}`),
         api<{ courts: Court[] }>('/api/courts'),
         api<{ clients: Client[] }>('/api/clients'),
       ]);
-      setMembers(memberData.members);
-      setCharges(memberData.charges);
-      setCourts(courtData.courts);
-      setClients(clientData.clients);
-      setError('');
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setLoading(false);
-    }
+      setMembers(memberData.members); setCharges(memberData.charges); setCourts(courtData.courts); setClients(clientData.clients);
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setLoading(false); }
   }
-
   useEffect(() => { void load(); }, [cycle]);
 
-  function openDialog() {
-    setClientId('');
-    setClientName('');
-    setClientPhone('');
-    setCourtId('');
-    setAmount('');
-    setClientMode(clients.length ? 'existing' : 'new');
-    setFormError('');
-    setFormNotice('');
-    setOpen(true);
+  async function run(label: string, fn: () => Promise<unknown>) {
+    setBusy(true);
+    try { await fn(); toast.success(label); await load(); }
+    catch (cause) { toast.error(errorMessage(cause)); }
+    finally { setBusy(false); }
   }
+  const setStatus = (member: Member, status: Member['status'], label: string) => run(label, () => api(`/api/monthly-members/${member.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }));
 
-  async function createClient() {
-    const name = clientName.trim();
-    if (!name) {
-      setFormError('Informe o nome do cliente.');
-      return;
-    }
-    setSaving(true);
-    setFormError('');
-    setFormNotice('');
-    try {
-      const result = await api<{ client: Client }>('/api/clients', {
-        method: 'POST',
-        body: JSON.stringify({ name, phone: clientPhone }),
-      });
-      setClients((current) => [...current, result.client].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')));
-      setClientId(result.client.id);
-      setClientName('');
-      setClientPhone('');
-      setClientMode('existing');
-      setFormNotice('Cliente cadastrado e selecionado. Complete os dados do mensalista.');
-    } catch (cause) {
-      setFormError(errorMessage(cause));
-    } finally {
-      setSaving(false);
-    }
-  }
+  const active = members.filter((m) => m.status === 'active');
+  const paused = members.filter((m) => m.status === 'paused');
+  const ended = members.filter((m) => m.status === 'ended');
+  const visible = members.filter((m) => m.status !== 'ended' || showEnded);
+  const paid = charges.filter((c) => c.paid_at), open = charges.filter((c) => !c.paid_at);
+  const late = open.some((c) => c.due_date < todayKey());
+  const sum = (list: Array<{ amount_cents: number }>) => list.reduce((total, item) => total + item.amount_cents, 0);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (clientMode === 'new') {
-      setFormError('Cadastre o cliente para continuar.');
-      return;
-    }
-    setSaving(true);
-    setFormError('');
-    setFormNotice('');
-    try {
-      await api('/api/monthly-members', {
-        method: 'POST',
-        body: JSON.stringify({
-          clientId,
-          courtId,
-          weekday: Number(weekday),
-          startTime,
-          durationMinutes: Number(duration),
-          amountCents: Math.round(Number(amount.replace(',', '.')) * 100),
-        }),
-      });
-      setOpen(false);
-      await load();
-    } catch (cause) {
-      setFormError(errorMessage(cause));
-    } finally {
-      setSaving(false);
-    }
-  }
+  return <div className="space-y-4 lg:space-y-5">
+    <PageHeader title="Mensalistas" description="Horários fixos toda semana e cobranças mensais."
+      actions={<>
+        <div className="inline-flex flex-1 items-center rounded-md border bg-card shadow-xs md:flex-none">
+          <button type="button" onClick={() => setCycle(cycleOf(addMonths(monthDate(cycle), -1)))} aria-label="Mês anterior" className="grid size-10 place-items-center rounded-l-md hover:bg-muted md:size-9"><ChevronLeft className="size-4" aria-hidden="true" /></button>
+          <span className="flex h-10 flex-1 items-center justify-center gap-2 border-x px-4 font-medium whitespace-nowrap md:h-9" aria-live="polite"><CalendarDays className="size-4 text-muted-foreground" aria-hidden="true" /><span className="first-letter:uppercase">{monthLabel(cycle)}</span></span>
+          <button type="button" onClick={() => setCycle(cycleOf(addMonths(monthDate(cycle), 1)))} aria-label="Próximo mês" className="grid size-10 place-items-center rounded-r-md hover:bg-muted md:size-9"><ChevronRight className="size-4" aria-hidden="true" /></button>
+        </div>
+        <Button className="hidden md:inline-flex" onClick={() => setFormOpen(true)}><Plus /> Novo mensalista</Button>
+      </>} />
+    {error && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{error}</div>}
 
-  async function setMember(id: string, status: string) {
-    try {
-      await api(`/api/monthly-members/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
-      await load();
-    } catch (cause) {
-      setError(errorMessage(cause));
-    }
-  }
+    {loading && !members.length && !error ? <div className="grid min-h-60 place-items-center"><LoaderCircle className="animate-spin text-brand-600" aria-label="Carregando" /></div> : <>
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
+        <StatCard label="Mensalistas ativos" icon={Repeat} value={active.length} sub={plural(paused.length, 'pausado', 'pausados')} />
+        <StatCard label="Receita recorrente" icon={TrendingUp} value={formatCurrency(sum(active))} sub="por mês, dos ativos" />
+        <StatCard label="Recebido no mês" icon={CircleCheck} value={formatCurrency(sum(paid))} sub={`${paid.length} de ${plural(charges.length, 'cobrança paga', 'cobranças pagas')}`} />
+        <StatCard label="Em aberto" icon={Hourglass} tone={open.length ? (late ? 'bg-rose-50 text-rose-600' : 'bg-amber-50 text-amber-600') : undefined} value={formatCurrency(sum(open))} sub={late ? 'há cobranças atrasadas' : open.length ? 'nenhuma atrasada' : 'tudo recebido'} />
+      </section>
 
-  async function paid(id: string) {
-    try {
-      await api(`/api/monthly-charges/${id}/paid`, { method: 'PATCH', body: '{}' });
-      await load();
-    } catch (cause) {
-      setError(errorMessage(cause));
-    }
-  }
+      <Panel>
+        <div className="flex flex-wrap items-center gap-2 border-b px-4 py-4 lg:px-5">
+          <h2 className="min-w-0 flex-1 text-[15px] font-semibold">Planos recorrentes <span className="ml-1 rounded-full bg-muted px-2 py-0.5 align-middle text-[11px] font-semibold text-muted-foreground">{active.length + paused.length}</span></h2>
+          {ended.length > 0 && <Button variant="ghost" size="sm" onClick={() => setShowEnded((v) => !v)} aria-pressed={showEnded} aria-label={showEnded ? 'Ocultar encerrados' : `Mostrar encerrados (${ended.length})`}>{showEnded ? 'Ocultar encerrados' : <><span className="sm:hidden">Encerrados ({ended.length})</span><span className="hidden sm:inline">Mostrar encerrados ({ended.length})</span></>}</Button>}
+        </div>
+        {visible.length ? <ul className="divide-y">{visible.map((m) => <PlanRow key={m.id} member={m} cycle={cycle} busy={busy}
+          onPause={() => void setStatus(m, m.status === 'active' ? 'paused' : 'active', m.status === 'active' ? 'Plano pausado — horários liberados na agenda' : 'Plano retomado')}
+          onEnd={() => setConfirm({ title: `Encerrar o plano de ${m.client_name}?`, text: 'Os horários futuros são liberados na agenda. As cobranças já pagas continuam no histórico.', action: 'Encerrar plano', danger: true, run: () => setStatus(m, 'ended', 'Plano encerrado') })} />)}</ul>
+          : <EmptyState icon={Repeat} title="Nenhum mensalista ainda" text="Cadastre um horário fixo semanal. A cobrança do mês é gerada automaticamente." action={<Button onClick={() => setFormOpen(true)}><Plus /> Novo mensalista</Button>} />}
+      </Panel>
 
-  return <div className="grid gap-5">
-    <header className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
-      <div><h1 className="text-2xl font-bold">Mensalistas</h1><p className="mt-1 text-sm text-muted-foreground">Horários recorrentes e cobranças mensais.</p></div>
-      <div className="grid w-full gap-2 min-[420px]:grid-cols-[160px_1fr] sm:flex sm:w-auto"><Input type="month" className="w-full sm:w-40" value={cycle} onChange={(event) => setCycle(event.target.value)} /><Button className="w-full sm:w-auto" onClick={openDialog}><Plus /> Novo mensalista</Button></div>
-    </header>
-    {error && <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>}
-    {loading ? <div className="grid min-h-36 place-items-center"><LoaderCircle className="animate-spin" /></div> : <>
-      <Card><CardHeader><CardTitle className="text-base">Planos recorrentes · {members.length}</CardTitle></CardHeader><CardContent className="grid gap-2">
-        {members.length ? members.map((member) => <article key={member.id} className="flex flex-col justify-between gap-2 rounded-lg border p-3 sm:flex-row sm:items-center">
-          <div><p className="font-semibold">{member.client_name} <span className="font-normal text-muted-foreground">· {member.court_name}</span></p><p className="text-xs text-muted-foreground">{days[member.weekday]} às {member.start_time} · {member.duration_minutes} min · {formatCurrency(member.amount_cents)}/mês</p></div>
-          <div className="flex items-center gap-2"><span className="text-xs capitalize text-muted-foreground">{member.status === 'active' ? 'Ativo' : member.status === 'paused' ? 'Pausado' : 'Encerrado'}</span>{member.status !== 'ended' && <Button size="sm" variant="outline" onClick={() => void setMember(member.id, member.status === 'active' ? 'paused' : 'active')}>{member.status === 'active' ? 'Pausar' : 'Ativar'}</Button>}{member.status !== 'ended' && <Button size="sm" variant="ghost" className="text-red-700" onClick={() => void setMember(member.id, 'ended')}>Encerrar</Button>}</div>
-        </article>) : <p className="py-7 text-center text-sm text-muted-foreground">Nenhum horário recorrente cadastrado.</p>}
-      </CardContent></Card>
-      <Card><CardHeader><CardTitle className="text-base">Cobranças · {cycle}</CardTitle></CardHeader><CardContent className="grid gap-2">
-        {charges.length ? charges.map((charge) => <article key={charge.id} className="flex flex-col justify-between gap-2 rounded-lg border p-3 sm:flex-row sm:items-center">
-          <div><p className="font-semibold">{charge.client_name} <span className="font-normal text-muted-foreground">· {charge.court_name}</span></p><p className="text-xs text-muted-foreground">Vencimento {formatDate(charge.due_date)} · {formatCurrency(charge.amount_cents)}</p></div>
-          <Button size="sm" variant={charge.paid_at ? 'outline' : 'secondary'} disabled={Boolean(charge.paid_at)} onClick={() => void paid(charge.id)}>{charge.paid_at ? 'Pago' : 'Marcar recebido'}</Button>
-        </article>) : <p className="py-7 text-center text-sm text-muted-foreground">Sem cobranças neste ciclo.</p>}
-      </CardContent></Card>
+      <Panel>
+        <div className="border-b px-4 py-4 lg:px-5">
+          <h2 className="text-[15px] font-semibold">Cobranças de {monthLabel(cycle, 'MMMM')}</h2>
+          <p className="text-[12.5px] text-muted-foreground">Uma cobrança por mensalista ativo, com vencimento no dia 5.</p>
+        </div>
+        {charges.length ? <ul className="divide-y">{charges.map((c) => {
+          const st = chargeStatus(c);
+          return <li key={c.id} className="flex items-center gap-3 px-4 py-3 lg:px-5">
+            <div className={cn('w-12 shrink-0 rounded-lg border py-1 text-center', st.tone === 'rose' ? 'border-rose-200 bg-rose-50' : 'bg-muted')}>
+              <div className="text-[10px] text-muted-foreground uppercase">vence</div><div className="leading-tight font-semibold tabular-nums">{c.due_date.slice(8)}/{c.due_date.slice(5, 7)}</div>
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-medium">{c.client_name} <span className="font-normal text-muted-foreground">· {c.court_name}</span></div>
+              <div className="mt-0.5 flex flex-wrap items-center gap-2"><ToneBadge tone={st.tone}>{st.label}</ToneBadge>{c.paid_at && <span className="text-[12px] text-muted-foreground">pago em {format(new Date(c.paid_at), 'dd/MM')}</span>}</div>
+            </div>
+            <div className="font-semibold tabular-nums">{formatCurrency(c.amount_cents)}</div>
+            {!c.paid_at && <Button disabled={busy} aria-label={`Marcar pago: ${c.client_name}`} onClick={() => setConfirm({ title: 'Registrar pagamento?', text: `${c.client_name} · ${formatCurrency(c.amount_cents)}. O valor entra no Financeiro como recebido e não pode ser desfeito por aqui.`, action: 'Marcar pago', run: () => run('Pagamento registrado', () => api(`/api/monthly-charges/${c.id}/paid`, { method: 'PATCH', body: '{}' })) })}>
+              <CircleCheck /><span className="hidden sm:inline">Marcar pago</span></Button>}
+          </li>;
+        })}</ul> : <EmptyState icon={Receipt} title="Nenhuma cobrança neste mês" text={active.length ? 'As cobranças aparecem quando o mês é aberto.' : 'Não há mensalistas ativos para cobrar.'} />}
+      </Panel>
     </>}
 
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent>
-        <DialogHeader><DialogTitle>Novo mensalista</DialogTitle><DialogDescription>Reserve um horário semanal recorrente e defina o valor mensal.</DialogDescription></DialogHeader>
-        <form className="grid gap-3" onSubmit={(event) => void submit(event)}>
-          <div className="grid gap-2">
-            <Label>Cliente</Label>
-            <div className="flex flex-wrap gap-2">
-              <Button type="button" size="sm" variant={clientMode === 'existing' ? 'secondary' : 'outline'} disabled={!clients.length} aria-pressed={clientMode === 'existing'} onClick={() => { setClientMode('existing'); setFormError(''); setFormNotice(''); }}>Cliente cadastrado</Button>
-              <Button type="button" size="sm" variant={clientMode === 'new' ? 'secondary' : 'outline'} aria-pressed={clientMode === 'new'} onClick={() => { setClientMode('new'); setFormError(''); setFormNotice(''); }}>Novo cliente</Button>
-            </div>
-            {clientMode === 'existing' ? <Select value={clientId} onValueChange={setClientId} required>
-              <SelectTrigger className="w-full"><SelectValue placeholder="Selecione um cliente" /></SelectTrigger>
-              <SelectContent>{clients.map((client) => <SelectItem key={client.id} value={client.id}>{client.name}</SelectItem>)}</SelectContent>
-            </Select> : <div className="grid gap-3 rounded-md border p-3">
-              <div className="grid gap-2"><Label htmlFor="monthly-client-name">Nome</Label><Input id="monthly-client-name" autoComplete="name" maxLength={100} value={clientName} onChange={(event) => setClientName(event.target.value)} placeholder="Nome do cliente" /></div>
-              <div className="grid gap-2"><Label htmlFor="monthly-client-phone">Telefone / WhatsApp (opcional)</Label><Input id="monthly-client-phone" type="tel" inputMode="tel" autoComplete="tel" placeholder="(31) 99999-9999" value={clientPhone} onChange={(event) => setClientPhone(event.target.value)} /></div>
-              <Button type="button" variant="outline" className="w-full sm:w-fit" disabled={saving || !clientName.trim()} onClick={() => void createClient()}>{saving && <LoaderCircle className="animate-spin" />}Cadastrar cliente e continuar</Button>
-            </div>}
-          </div>
-          <div className="grid gap-2"><Label>Quadra</Label><Select value={courtId} onValueChange={setCourtId} required><SelectTrigger className="w-full"><SelectValue placeholder="Selecione uma quadra" /></SelectTrigger><SelectContent>{courts.map((court) => <SelectItem key={court.id} value={court.id}>{court.name} · {court.sport}</SelectItem>)}</SelectContent></Select></div>
-          <div className="grid gap-3 min-[420px]:grid-cols-2">
-            <div className="grid gap-2"><Label>Dia</Label><Select value={weekday} onValueChange={setWeekday}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent>{days.map((day, index) => <SelectItem key={day} value={String(index)}>{day}</SelectItem>)}</SelectContent></Select></div>
-            <div className="grid gap-2"><Label>Início</Label><Select value={startTime} onValueChange={setStartTime}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent>{times.map((time) => <SelectItem key={time} value={time}>{time}</SelectItem>)}</SelectContent></Select></div>
-          </div>
-          <div className="grid gap-3 min-[420px]:grid-cols-2">
-            <div className="grid gap-2"><Label>Duração</Label><Select value={duration} onValueChange={setDuration}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent>{[60, 90, 120, 150, 180, 210, 240].map((minutes) => <SelectItem key={minutes} value={String(minutes)}>{minutes} min</SelectItem>)}</SelectContent></Select></div>
-            <div className="grid gap-2"><Label>Valor mensal (R$)</Label><Input type="number" min="0.01" step="0.01" required value={amount} onChange={(event) => setAmount(event.target.value)} /></div>
-          </div>
-          {formNotice && <p role="status" className="text-sm text-emerald-800">{formNotice}</p>}
-          {formError && <p role="alert" className="text-sm text-red-700">{formError}</p>}
-          <DialogFooter><Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancelar</Button><Button type="submit" disabled={saving || !clientId || !courtId || clientMode === 'new'}>{saving && <LoaderCircle className="animate-spin" />}Salvar mensalista</Button></DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+    <MemberSheet open={formOpen} onOpenChange={setFormOpen} cycle={cycle} courts={courts.filter(isActiveCourt)} clients={clients}
+      onClientCreated={(client) => setClients((list) => [...list, client].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')))} onSaved={() => { setFormOpen(false); void load(); }} />
+    <AlertDialog open={Boolean(confirm)} onOpenChange={(value) => { if (!value) setConfirm(null); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader className="flex flex-row items-start gap-3 text-left">
+          <span className={cn('grid size-10 shrink-0 place-items-center rounded-full', confirm?.danger ? 'bg-rose-50 text-rose-600' : 'bg-brand-50 text-brand-700')}>{confirm?.danger ? <CircleX className="size-5" aria-hidden="true" /> : <CircleCheck className="size-5" aria-hidden="true" />}</span>
+          <div className="space-y-1"><AlertDialogTitle>{confirm?.title}</AlertDialogTitle><AlertDialogDescription>{confirm?.text}</AlertDialogDescription></div>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="grid grid-cols-2 gap-2 sm:flex">
+          <AlertDialogCancel>Voltar</AlertDialogCancel>
+          <AlertDialogAction className={confirm?.danger ? 'bg-rose-600 text-white hover:bg-rose-700' : undefined} onClick={async (event) => { event.preventDefault(); const c = confirm; setConfirm(null); await c?.run(); }}>{confirm?.action}</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </div>;
+}
+
+function PlanRow({ member: m, cycle, busy, onPause, onEnd }: { member: Member; cycle: string; busy: boolean; onPause: () => void; onEnd: () => void }) {
+  const dates = datesIn(cycle, m.weekday), today = todayKey();
+  const start = minutesOfTime(m.start_time), idle = m.status !== 'active';
+  return <li className={cn('flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:px-5', idle && 'bg-muted/40')}>
+    <div className="flex min-w-0 items-center gap-3 lg:w-64">
+      <Avatar name={m.client_name} className="size-10" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2"><span className="truncate font-medium">{m.client_name}</span><ToneBadge tone={MEMBER[m.status].tone}>{MEMBER[m.status].label}</ToneBadge></div>
+        {m.phone && <div className="text-[12px] text-muted-foreground tabular-nums">{formatPhone(m.phone)}</div>}
+      </div>
+    </div>
+    <div className={cn('min-w-0 flex-1', idle && 'opacity-60')}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
+        <span className="inline-flex items-center gap-1.5 font-medium"><Repeat className="size-4 text-brand-600" aria-hidden="true" />{everyDay(m.weekday)}</span>
+        <span className="inline-flex items-center gap-1.5 text-muted-foreground tabular-nums"><Clock className="size-4" aria-hidden="true" />{m.start_time}–{timeOfMinutes(start + m.duration_minutes)}</span>
+        <span className="inline-flex items-center gap-1.5 text-muted-foreground"><LandPlot className="size-4" aria-hidden="true" />{m.court_name}</span>
+      </div>
+      {m.status !== 'ended' && <div className="mt-2 flex flex-wrap gap-1.5">
+        {dates.map((d) => {
+          const past = d < today, isToday = d === today;
+          return <span key={d} className={cn('rounded-md border px-2 py-0.5 text-[11.5px] font-medium tabular-nums', isToday ? 'border-brand-900 bg-brand-900 text-white' : past ? 'border-border bg-muted text-muted-foreground line-through decoration-muted-foreground/40' : 'border-brand-100 bg-white text-brand-700')}>{d.slice(8)}/{d.slice(5, 7)}{isToday ? ' · hoje' : ''}</span>;
+        })}
+        <span className="ml-1 self-center text-[11.5px] text-muted-foreground">{plural(dates.length, 'jogo', 'jogos')} · {formatCurrency(dates.length ? m.amount_cents / dates.length : 0)}/jogo</span>
+      </div>}
+    </div>
+    <div className="flex items-center gap-2 lg:justify-end">
+      <div className="mr-2 flex-1 lg:flex-none lg:text-right"><div className="font-semibold tabular-nums">{formatCurrency(m.amount_cents)}<span className="text-[12px] font-normal text-muted-foreground">/mês</span></div><div className="text-[11.5px] text-muted-foreground">{durationLabel(m.duration_minutes)} por jogo</div></div>
+      {m.status !== 'ended' && <>
+        <Button variant="outline" disabled={busy} onClick={onPause}>{m.status === 'active' ? <><Pause />Pausar</> : <><Play />Retomar</>}</Button>
+        <Button variant="outline" size="icon" disabled={busy} className="text-rose-600 hover:bg-rose-50 hover:text-rose-700" aria-label={`Encerrar plano de ${m.client_name}`} title="Encerrar" onClick={onEnd}><CircleX /></Button>
+      </>}
+    </div>
+  </li>;
+}
+
+const TIMES = Array.from({ length: 36 }, (_, i) => 360 + i * 30); // 06:00 → 23:30
+
+function MemberSheet({ open, onOpenChange, cycle, courts, clients, onClientCreated, onSaved }: { open: boolean; onOpenChange: (open: boolean) => void; cycle: string; courts: Court[]; clients: Client[]; onClientCreated: (client: Client) => void; onSaved: () => void }) {
+  const [mode, setMode] = useState<'existing' | 'new'>('existing');
+  const [clientId, setClientId] = useState('');
+  const [clientName, setClientName] = useState('');
+  const [clientPhone, setClientPhone] = useState('');
+  const [courtId, setCourtId] = useState('');
+  const [weekday, setWeekday] = useState(1);
+  const [start, setStart] = useState(19 * 60);
+  const [end, setEnd] = useState(20 * 60);
+  const [amount, setAmount] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setMode(clients.length ? 'existing' : 'new'); setClientId(''); setClientName(''); setClientPhone('');
+    setCourtId(courts[0]?.id || ''); setWeekday(1); setStart(19 * 60); setEnd(20 * 60); setAmount(''); setError('');
+  }, [open]);
+  useEffect(() => { if (end <= start || end - start > 240) setEnd(start + 60); }, [start, end]);
+
+  const endOptions = useMemo(() => Array.from({ length: 7 }, (_, i) => start + 60 + i * 30).filter((t) => t <= 24 * 60), [start]);
+  const games = datesIn(cycle, weekday).length;
+  const cents = Math.round(Number(amount.replace(/\./g, '').replace(',', '.')) * 100) || 0;
+
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setError('');
+    setSaving(true);
+    try {
+      let id = clientId;
+      if (mode === 'new') {
+        const created = await api<{ client: Client }>('/api/clients', { method: 'POST', body: JSON.stringify({ name: clientName.trim(), phone: clientPhone }) });
+        onClientCreated(created.client); id = created.client.id; setMode('existing'); setClientId(id);
+      }
+      await api('/api/monthly-members', { method: 'POST', body: JSON.stringify({ clientId: id, courtId, weekday, startTime: timeOfMinutes(start), durationMinutes: end - start, amountCents: cents }) });
+      toast.success('Mensalista cadastrado');
+      onSaved();
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setSaving(false); }
+  }
+
+  const ready = (mode === 'existing' ? Boolean(clientId) : clientName.trim().length >= 2) && Boolean(courtId) && cents > 0;
+  return <ResponsiveSheet open={open} onOpenChange={onOpenChange} title="Novo mensalista" description="Horário fixo toda semana, com cobrança mensal."
+    footer={<div className="grid grid-cols-2 gap-2">
+      <Button type="button" variant="outline" className="h-10" onClick={() => onOpenChange(false)}>Cancelar</Button>
+      <Button type="submit" form="member-form" className="h-10" disabled={saving || !ready}>{saving && <LoaderCircle className="animate-spin" />}Cadastrar mensalista</Button>
+    </div>}>
+    <form id="member-form" className="space-y-4 px-5 py-4" onSubmit={(event) => void submit(event)}>
+      <div className="grid gap-1.5">
+        <Label>Cliente</Label>
+        <Segmented label="Tipo de cliente" value={mode} onChange={setMode} className="grid w-full grid-cols-2" options={[{ value: 'existing', label: 'Já cadastrado' }, { value: 'new', label: 'Novo cliente' }]} />
+        {mode === 'existing'
+          ? <Select value={clientId} onValueChange={setClientId}><SelectTrigger className="h-10 w-full" aria-label="Cliente"><SelectValue placeholder={clients.length ? 'Selecione o cliente' : 'Nenhum cliente cadastrado'} /></SelectTrigger><SelectContent>{clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}{c.phone ? ` · ${formatPhone(c.phone)}` : ''}</SelectItem>)}</SelectContent></Select>
+          : <div className="grid gap-3 rounded-lg border p-3">
+            <div className="grid gap-1.5"><Label htmlFor="member-name">Nome</Label><Input id="member-name" className="h-10" maxLength={100} value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="Nome do cliente" /></div>
+            <div className="grid gap-1.5"><Label htmlFor="member-phone">WhatsApp <span className="font-normal text-muted-foreground">(opcional)</span></Label><Input id="member-phone" className="h-10" type="tel" inputMode="tel" value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} onBlur={() => setClientPhone(formatPhone(clientPhone))} placeholder="(00) 00000-0000" /></div>
+          </div>}
+      </div>
+      <div className="grid gap-1.5"><Label>Quadra</Label><Select value={courtId} onValueChange={setCourtId}><SelectTrigger className="h-10 w-full" aria-label="Quadra"><SelectValue placeholder="Selecione a quadra" /></SelectTrigger><SelectContent>{courts.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} · {c.sport}</SelectItem>)}</SelectContent></Select></div>
+      <fieldset className="grid gap-1.5"><legend className="mb-1.5 text-sm font-medium">Dia da semana</legend>
+        <div className="grid grid-cols-7 gap-1" role="radiogroup" aria-label="Dia da semana">
+          {[1, 2, 3, 4, 5, 6, 0].map((d) => <button key={d} type="button" role="radio" aria-checked={weekday === d} aria-label={DAYS[d]} onClick={() => setWeekday(d)}
+            className={cn('grid h-10 place-items-center rounded-md border text-[12.5px] font-medium transition', weekday === d ? 'border-brand-900 bg-brand-900 text-white' : 'hover:bg-muted')}>{DAYS[d].slice(0, 3)}</button>)}
+        </div>
+      </fieldset>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-1.5"><Label>Início</Label><Select value={String(start)} onValueChange={(v) => setStart(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Início"><SelectValue /></SelectTrigger><SelectContent>{TIMES.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
+        <div className="grid gap-1.5"><Label>Fim</Label><Select value={String(end)} onValueChange={(v) => setEnd(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Fim"><SelectValue /></SelectTrigger><SelectContent>{endOptions.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
+      </div>
+      <div className="grid gap-1.5"><Label htmlFor="member-amount">Valor mensal</Label>
+        <div className="relative"><span className="absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground">R$</span><Input id="member-amount" className="h-10 pl-9 tabular-nums" inputMode="decimal" placeholder="0,00" value={amount} onChange={(e) => setAmount(e.target.value)} /></div></div>
+      <div className="flex gap-2 rounded-lg border border-brand-100 bg-brand-50 px-3 py-2.5 text-[12.5px] text-brand-800">
+        <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+        <span>Em <b>{monthLabel(cycle, 'MMMM')}</b> são <b>{plDay(weekday, games)}</b>{cents > 0 && games > 0 ? <> — {formatCurrency(Math.round(cents / games))} por jogo</> : null}. O horário fica reservado na agenda e a cobrança vence todo dia 5.</span>
+      </div>
+      {error && <p role="alert" className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">{error}</p>}
+    </form>
+  </ResponsiveSheet>;
 }

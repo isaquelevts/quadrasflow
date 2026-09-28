@@ -1,97 +1,199 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { LoaderCircle, Plus, Save, Waves } from 'lucide-react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
+import { Banknote, CalendarCheck2, CalendarDays, Clock, Gauge, LandPlot, LoaderCircle, Pencil, Plus } from 'lucide-react';
+import { addDays, startOfWeek } from 'date-fns';
+import { toast } from 'sonner';
 import { ArenaImagePicker } from '@/components/ArenaImagePicker';
+import { EmptyState, PageHeader, StatCard } from '@/components/app/page';
+import { ResponsiveSheet } from '@/components/app/ResponsiveSheet';
+import { usePrimaryAction } from '@/components/app/shell-context';
+import { ToneBadge } from '@/components/app/status';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { api } from '@/lib/api';
-import { errorMessage, formatCurrency } from '@/lib/format';
+import {
+  activeBookings, bookingMinutes, dateFromKey, fetchArenaBasics, fetchDay, isActiveCourt, keyOf, openWindow, todayKey,
+  type Court, type DayData, type HoursDay,
+} from '@/lib/arena';
+import { errorMessage, formatCurrency, minutesOf, plural, timeOfMinutes } from '@/lib/format';
+import { cn } from '@/lib/utils';
 
-type Court = { id: string; name: string; sport: string; price_cents: number; photo_url: string | null; active?: number };
-const sports = ['Society', 'Futsal', 'Futebol de Campo', 'Beach Tennis', 'Padel', 'Tênis', 'Vôlei', 'Basquete', 'Vôlei de Praia', 'Futevôlei', 'Pickleball', 'Handebol', 'Peteca', 'Squash', 'Outro'];
+const SPORTS = ['Society', 'Futsal', 'Futebol de Campo', 'Beach Tennis', 'Padel', 'Tênis', 'Vôlei', 'Basquete', 'Vôlei de Praia', 'Futevôlei', 'Pickleball', 'Handebol', 'Peteca', 'Squash', 'Outro'];
+type Surface = 'sand' | 'grass' | 'hard';
+const surfaceOf = (sport: string): Surface => ['Vôlei', 'Vôlei de Praia', 'Futevôlei', 'Beach Tennis', 'Peteca'].includes(sport) ? 'sand' : ['Society', 'Futebol de Campo'].includes(sport) ? 'grass' : 'hard';
 
 export function CourtsPage() {
   const [courts, setCourts] = useState<Court[]>([]);
-  const [editing, setEditing] = useState<Court | null>(null);
+  const [hours, setHours] = useState<HoursDay[]>([]);
+  const [today, setToday] = useState<DayData | null>(null);
+  const [weekCount, setWeekCount] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [open, setOpen] = useState(false);
   const [error, setError] = useState('');
-  const [name, setName] = useState('');
-  const [sport, setSport] = useState('Society');
-  const [price, setPrice] = useState('150');
-  const [photo, setPhoto] = useState<string[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState<Court | 'new' | null>(null);
+
+  usePrimaryAction(() => setEditing('new'));
 
   async function load() {
-    setLoading(true);
+    setLoading(true); setError('');
     try {
-      const result = await api<{ courts: Court[] }>('/api/courts');
-      setCourts(result.courts);
-      setError('');
+      const key = todayKey();
+      const monday = startOfWeek(dateFromKey(key), { weekStartsOn: 1 });
+      const [basics, days] = await Promise.all([fetchArenaBasics(), Promise.all(Array.from({ length: 7 }, (_, i) => fetchDay(keyOf(addDays(monday, i)))))]);
+      setCourts(basics.courts); setHours(basics.hours);
+      setToday(days.find((d) => d.date === key) || null);
+      setWeekCount(days.reduce((sum, d) => sum + activeBookings(d.bookings).filter((b) => b.status !== 'monthly').length, 0));
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setLoading(false); }
   }
-
   useEffect(() => { void load(); }, []);
 
-  function addCourt() {
-    setEditing(null);
-    setName('');
-    setSport('Society');
-    setPrice('150');
-    setPhoto([]);
-    setError('');
-    setOpen(true);
-  }
+  const opening = openWindow(hours, todayKey());
+  const active = courts.filter(isActiveCourt);
+  const avgPrice = active.length ? active.reduce((sum, c) => sum + c.price_cents, 0) / active.length : 0;
+  const occOf = (courtId: string) => {
+    if (!opening || !today) return 0;
+    const minutes = activeBookings(today.bookings).filter((b) => b.court_id === courtId).reduce((sum, b) => sum + bookingMinutes(b), 0);
+    return Math.min(100, Math.round(minutes / (opening.close - opening.open) * 100));
+  };
+  const avgOcc = active.length ? Math.round(active.reduce((sum, c) => sum + occOf(c.id), 0) / active.length) : 0;
 
-  function editCourt(court: Court) {
-    setEditing(court);
-    setName(court.name);
-    setSport(court.sport);
-    setPrice((court.price_cents / 100).toFixed(2));
-    setPhoto(court.photo_url ? [court.photo_url] : []);
-    setError('');
-    setOpen(true);
-  }
+  return <div className="space-y-4 lg:space-y-5">
+    <PageHeader title="Quadras" description="Modalidades, preços e ocupação de hoje."
+      actions={<Button className="hidden md:inline-flex" onClick={() => setEditing('new')}><Plus /> Adicionar quadra</Button>} />
+    {error && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{error}</div>}
+
+    {loading && !courts.length ? <div className="grid min-h-60 place-items-center"><LoaderCircle className="animate-spin text-brand-600" aria-label="Carregando" /></div> : <>
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
+        <StatCard label="Quadras ativas" icon={LandPlot} value={<>{active.length}<span className="text-base font-normal text-muted-foreground"> / {courts.length}</span></>} sub="disponíveis para reserva" />
+        <StatCard label="Preço médio" icon={Banknote} value={formatCurrency(avgPrice)} sub="por hora, nas quadras ativas" />
+        <StatCard label="Ocupação hoje" icon={Gauge} value={opening ? `${avgOcc}%` : '—'} sub={opening ? 'média entre as quadras' : 'arena fechada hoje'} />
+        <StatCard label="Reservas na semana" icon={CalendarCheck2} value={weekCount} sub="de segunda a domingo, sem canceladas" />
+      </section>
+
+      {courts.length ? <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        {courts.map((court) => <CourtCard key={court.id} court={court} today={today} opening={opening} occ={occOf(court.id)} onEdit={() => setEditing(court)} />)}
+        <button type="button" onClick={() => setEditing('new')} className="flex min-h-[220px] flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed text-muted-foreground transition hover:border-brand-400 hover:bg-brand-50/50 hover:text-brand-700 focus-visible:outline-2 focus-visible:outline-brand-500">
+          <span className="grid size-12 place-items-center rounded-full border bg-white shadow-xs"><Plus className="size-5" aria-hidden="true" /></span>
+          <span className="font-medium">Adicionar quadra</span>
+          <span className="max-w-[220px] text-center text-[12.5px]">Cadastre modalidade, preço e foto.</span>
+        </button>
+      </section> : <div className="rounded-xl border bg-card shadow-card"><EmptyState icon={LandPlot} title="Nenhuma quadra cadastrada" text="Adicione uma quadra para começar a receber reservas." action={<Button onClick={() => setEditing('new')}><Plus /> Adicionar quadra</Button>} /></div>}
+    </>}
+
+    <CourtSheet court={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void load(); }} />
+  </div>;
+}
+
+function CourtCard({ court, today, opening, occ, onEdit }: { court: Court; today: DayData | null; opening: ReturnType<typeof openWindow>; occ: number; onEdit: () => void }) {
+  const active = isActiveCourt(court);
+  const bookings = today ? activeBookings(today.bookings).filter((b) => b.court_id === court.id) : [];
+  const blocks = today ? today.blocks.filter((b) => b.court_id === court.id) : [];
+  const slots = opening ? Array.from({ length: Math.ceil((opening.close - opening.open) / 30) }, (_, i) => opening.open + i * 30) : [];
+  const stateAt = (t: number) => {
+    const inRange = (s: string, e: string) => t >= minutesOf(s) && t < minutesOf(e);
+    if (blocks.some((b) => inRange(b.start_at, b.end_at))) return 'block';
+    const hit = bookings.find((b) => inRange(b.start_at, b.end_at));
+    return hit ? (hit.status === 'monthly' ? 'monthly' : 'booked') : 'free';
+  };
+  return <article className={cn('flex flex-col overflow-hidden rounded-xl border bg-card shadow-card transition', !active && 'opacity-70')}>
+    <div className={cn('relative h-40', !active && 'grayscale')}>
+      {court.photo_url ? <img src={court.photo_url} alt={`Foto da quadra ${court.name}`} className="absolute inset-0 size-full object-cover" /> : <CourtArt sport={court.sport} />}
+      <div className="absolute inset-x-0 top-0 flex items-start justify-between p-3">
+        <span className="inline-flex items-center gap-1.5 rounded-md bg-white/90 px-2 py-1 text-[11.5px] font-medium shadow-xs backdrop-blur">{court.sport}</span>
+        <ToneBadge tone={active ? 'green' : 'gray'} className="bg-white/90">{active ? 'Ativa' : 'Inativa'}</ToneBadge>
+      </div>
+    </div>
+    <div className="flex flex-1 flex-col p-4 lg:p-5">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0"><h3 className="truncate text-base font-semibold">{court.name}</h3>
+          <p className="flex items-center gap-1 text-[12.5px] text-muted-foreground"><Clock className="size-3" aria-hidden="true" />{opening ? `Hoje, ${opening.openTime} às ${opening.closeTime}` : 'Arena fechada hoje'}</p></div>
+        <div className="text-right"><div className="text-[11px] text-muted-foreground">por hora</div><div className="text-lg leading-tight font-semibold tabular-nums">{formatCurrency(court.price_cents)}</div></div>
+      </div>
+      {opening && <div className="mt-4">
+        <div className="mb-1.5 flex items-center justify-between text-[12px]">
+          <span className="text-muted-foreground">Hoje · {plural(bookings.length, 'reserva', 'reservas')}</span>
+          <span className="font-medium tabular-nums">{occ}% ocupada</span>
+        </div>
+        <div className="flex gap-0.5" role="img" aria-label={`Ocupação de hoje: ${occ}%`}>
+          {slots.map((t) => { const s = stateAt(t); return <span key={t} className={cn('h-2 flex-1 rounded-sm', s === 'booked' ? 'bg-brand-500' : s === 'monthly' ? 'bg-lime-400' : s === 'block' ? 'bg-gray-300' : 'bg-muted')} />; })}
+        </div>
+        <div className="mt-1 flex justify-between text-[10.5px] text-muted-foreground tabular-nums"><span>{opening.openTime}</span><span>{timeOfMinutes(Math.floor((opening.open + opening.close) / 60 / 2) * 60)}</span><span>{opening.closeTime}</span></div>
+      </div>}
+      <div className="-mx-4 mt-auto flex items-center justify-end gap-2 border-t px-4 pt-4 lg:-mx-5 lg:px-5" style={{ marginTop: opening ? undefined : '1rem' }}>
+        <Button asChild variant="outline" size="icon" aria-label={`Ver ${court.name} na agenda`} title="Ver na agenda"><Link to="/agenda"><CalendarDays /></Link></Button>
+        <Button variant="outline" onClick={onEdit}><Pencil /> Editar</Button>
+      </div>
+    </div>
+  </article>;
+}
+
+/** Ilustração no lugar da foto, quando a quadra não tem uma. */
+function CourtArt({ sport }: { sport: string }) {
+  const s = surfaceOf(sport);
+  const [from, to] = { sand: ['#e9d3a8', '#d7b77e'], grass: ['#3f9a5c', '#2b7a45'], hard: ['#3f7fae', '#2d6690'] }[s];
+  const line = s === 'sand' ? '#1d4f8a' : '#ffffff';
+  const id = `art-${s}`;
+  return <svg viewBox="0 0 400 200" preserveAspectRatio="xMidYMid slice" className="absolute inset-0 size-full" aria-hidden="true">
+    <defs><linearGradient id={id} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={from} /><stop offset="1" stopColor={to} /></linearGradient></defs>
+    <rect width="400" height="200" fill={`url(#${id})`} />
+    {s === 'grass' && Array.from({ length: 8 }, (_, i) => <rect key={i} x={i * 50} width="25" height="200" fill="#fff" opacity=".05" />)}
+    <rect x="40" y="40" width="320" height="130" fill="none" stroke={line} strokeWidth="3" opacity=".8" />
+    <line x1="200" y1="40" x2="200" y2="170" stroke={line} strokeWidth="3" opacity=".8" />
+    {s !== 'sand' && <circle cx="200" cy="105" r="24" fill="none" stroke={line} strokeWidth="3" opacity=".8" />}
+    <rect width="400" height="200" fill="#000" opacity=".08" />
+  </svg>;
+}
+
+function CourtSheet({ court, onClose, onSaved }: { court: Court | 'new' | null; onClose: () => void; onSaved: () => void }) {
+  const editing = court && court !== 'new' ? court : null;
+  const [name, setName] = useState('');
+  const [sport, setSport] = useState('Society');
+  const [price, setPrice] = useState('150,00');
+  const [photo, setPhoto] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const sports = useMemo(() => editing && !SPORTS.includes(editing.sport) ? [editing.sport, ...SPORTS] : SPORTS, [editing]);
+
+  useEffect(() => {
+    if (!court) return;
+    setName(editing?.name || ''); setSport(editing?.sport || 'Society');
+    setPrice(editing ? (editing.price_cents / 100).toFixed(2).replace('.', ',') : '150,00');
+    setPhoto(editing?.photo_url ? [editing.photo_url] : []); setError('');
+  }, [court]);
 
   async function submit(event: FormEvent) {
-    event.preventDefault();
+    event.preventDefault(); setError('');
+    const cents = Math.round(Number(price.replace(/\./g, '').replace(',', '.')) * 100);
+    if (!Number.isFinite(cents) || cents < 0) { setError('Confira o preço por hora.'); return; }
     setSaving(true);
-    setError('');
-    const body = JSON.stringify({ name: name.trim(), sport, priceCents: Math.round(Number(price.replace(',', '.')) * 100), photoUrl: photo[0] || null });
+    const body = JSON.stringify({ name: name.trim(), sport, priceCents: cents, photoUrl: photo[0] || null });
     try {
       if (editing) await api(`/api/courts/${editing.id}`, { method: 'PUT', body });
       else await api('/api/courts', { method: 'POST', body });
-      setOpen(false);
-      await load();
+      toast.success(editing ? 'Quadra atualizada' : 'Quadra adicionada');
+      onSaved();
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setSaving(false); }
   }
 
-  return <div className="grid gap-5">
-    <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-      <div><h1 className="text-2xl font-bold tracking-tight">Quadras</h1><p className="mt-1 text-sm text-muted-foreground">Modalidades, preços e disponibilidade.</p></div>
-      <Button className="w-full sm:w-auto" onClick={addCourt}><Plus /> Adicionar quadra</Button>
-    </header>
-    {error && !open && <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>}
-    {loading ? <div className="grid min-h-40 place-items-center"><LoaderCircle className="animate-spin text-primary" /></div> : courts.length ? <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{courts.map((court) => <Card key={court.id} className="overflow-hidden">
-      {court.photo_url ? <img src={court.photo_url} alt={`Foto de ${court.name}`} className="h-40 w-full bg-muted object-cover" /> : <div className="grid h-24 place-items-center bg-emerald-50 text-primary"><Waves aria-hidden="true" /></div>}
-      <CardHeader className="flex flex-row items-center gap-3 space-y-0"><div className="min-w-0"><CardTitle className="truncate text-base">{court.name}</CardTitle><p className="text-sm text-muted-foreground">{court.sport}</p></div></CardHeader>
-      <CardContent className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs text-muted-foreground">Preço por hora</p><strong>{formatCurrency(court.price_cents)}</strong></div><div className="flex items-center gap-2"><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-800">{court.active === 0 ? 'Inativa' : 'Ativa'}</span><Button variant="outline" size="sm" onClick={() => editCourt(court)}>Editar</Button></div></CardContent>
-    </Card>)}</section> : <Card><CardContent className="grid min-h-48 place-items-center text-center"><div><Waves className="mx-auto mb-3 text-muted-foreground" /><p className="font-semibold">Nenhuma quadra cadastrada</p><p className="mt-1 text-sm text-muted-foreground">Adicione uma quadra para começar a receber reservas.</p></div></CardContent></Card>}
-    <Dialog open={open} onOpenChange={setOpen}><DialogContent><DialogHeader><DialogTitle>{editing ? 'Editar quadra' : 'Adicionar quadra'}</DialogTitle><DialogDescription>Atualize o nome, a modalidade, o preço e a foto desta quadra.</DialogDescription></DialogHeader>
-      <form className="grid gap-4" onSubmit={(event) => void submit(event)}>
-        <div className="grid gap-2"><Label htmlFor="court-name">Nome</Label><Input id="court-name" autoFocus required maxLength={80} placeholder="Ex.: Society 1" value={name} onChange={(event) => setName(event.target.value)} /></div>
-        <div className="grid gap-2"><Label>Esporte principal</Label><Select value={sport} onValueChange={setSport}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent>{sports.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent></Select></div>
-        <div className="grid gap-2"><Label htmlFor="court-price">Preço por hora (R$)</Label><Input id="court-price" type="number" inputMode="decimal" min="0" max="1000000" step="0.01" required value={price} onChange={(event) => setPrice(event.target.value)} /></div>
-        <ArenaImagePicker label="Foto da quadra" images={photo} maxImages={1} onChange={setPhoto} onBusyChange={setUploading} />
-        {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-        <DialogFooter><Button className="w-full sm:w-auto" type="button" variant="outline" onClick={() => setOpen(false)}>Cancelar</Button><Button className="w-full sm:w-auto" type="submit" disabled={saving || uploading}>{saving ? <LoaderCircle className="animate-spin" /> : editing ? <Save /> : <Plus />}{editing ? 'Salvar alterações' : 'Salvar quadra'}</Button></DialogFooter>
-      </form>
-    </DialogContent></Dialog>
-  </div>;
+  return <ResponsiveSheet open={Boolean(court)} onOpenChange={(open) => { if (!open) onClose(); }}
+    title={editing ? 'Editar quadra' : 'Nova quadra'} description={editing ? editing.name : 'Ela aparece na agenda e no bot assim que for salva.'}
+    footer={<div className="grid grid-cols-2 gap-2">
+      <Button type="button" variant="outline" className="h-10" onClick={onClose}>Cancelar</Button>
+      <Button type="submit" form="court-form" className="h-10" disabled={saving || uploading}>{saving && <LoaderCircle className="animate-spin" />}{editing ? 'Salvar alterações' : 'Adicionar quadra'}</Button>
+    </div>}>
+    <form id="court-form" className="space-y-4 px-5 py-4" onSubmit={(event) => void submit(event)}>
+      <ArenaImagePicker label="Foto da quadra" images={photo} maxImages={1} onChange={setPhoto} onBusyChange={setUploading} />
+      <div className="grid gap-1.5"><Label htmlFor="court-name">Nome</Label><Input id="court-name" className="h-10" required maxLength={80} placeholder="Ex.: Areia 2" value={name} onChange={(event) => setName(event.target.value)} /></div>
+      <div className="grid gap-1.5"><Label>Modalidade</Label><Select value={sport} onValueChange={setSport}><SelectTrigger className="h-10 w-full"><SelectValue /></SelectTrigger><SelectContent>{sports.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent></Select></div>
+      <div className="grid gap-1.5"><Label htmlFor="court-price">Preço por hora</Label>
+        <div className="relative"><span className="absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground">R$</span><Input id="court-price" className="h-10 pl-9 tabular-nums" inputMode="decimal" required value={price} onChange={(event) => setPrice(event.target.value)} /></div>
+        <span className="text-[12px] text-muted-foreground">Usado quando a tabela de preços da arena não cobre o horário.</span></div>
+      <p className="rounded-md bg-muted/70 px-3 py-2.5 text-[12.5px] text-muted-foreground">O horário de funcionamento vale para todas as quadras e é ajustado em Configurações.</p>
+      {error && <p role="alert" className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">{error}</p>}
+    </form>
+  </ResponsiveSheet>;
 }
