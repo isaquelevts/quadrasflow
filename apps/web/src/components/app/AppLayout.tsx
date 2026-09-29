@@ -4,6 +4,7 @@ import {
   Settings2, Trophy, UserCog, Users, Wallet, type LucideProps,
 } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import logoMark from '@/assets/logo-mark.svg';
 import { useAuth } from '@/auth/AuthProvider';
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu,
@@ -84,7 +85,7 @@ function AppSidebar() {
   return <Sidebar className="border-r-0">
     <SidebarHeader className="gap-0 p-0">
       <Link to="/" className="flex h-16 items-center gap-2.5 border-b border-sidebar-border px-5">
-        <span className="grid size-8 place-items-center rounded-lg bg-lime-400 font-bold text-brand-950">Q</span>
+        <img src={logoMark} alt="" aria-hidden="true" className="size-8" />
         <span className="text-[15px] font-semibold tracking-tight text-white">Quadras<span className="text-lime-400">Flow</span></span>
       </Link>
       <div className="px-3 pt-4">
@@ -155,7 +156,7 @@ function AppHeader() {
         <Menu className="size-4" aria-hidden="true" />
       </button>
       <div className="flex min-w-0 items-center gap-2 lg:hidden">
-        <span aria-hidden="true" className="grid size-7 shrink-0 place-items-center rounded-md bg-brand-950 text-xs font-bold text-lime-400">Q</span>
+        <img src={logoMark} alt="" aria-hidden="true" className="size-7 shrink-0" />
         <span className="truncate font-semibold tracking-tight">{title}</span>
       </div>
       <nav aria-label="Caminho" className="hidden items-center gap-1.5 text-[13px] lg:flex">
