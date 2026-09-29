@@ -15,7 +15,7 @@ import { ShellProvider, useShell, type ShellCounts } from '@/components/app/shel
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
-type NavItem = { label: string; path: string; icon: ComponentType<LucideProps>; extra?: (counts: ShellCounts) => ReactNode };
+type NavItem = { label: string; path: string; icon: ComponentType<LucideProps>; extra?: (counts: ShellCounts) => ReactNode; adminOnly?: boolean };
 
 export const navigation: Array<{ group: string; items: NavItem[] }> = [
   { group: 'Operação', items: [
@@ -27,17 +27,21 @@ export const navigation: Array<{ group: string; items: NavItem[] }> = [
   ] },
   { group: 'Gestão', items: [
     { label: 'Clientes', path: '/clientes', icon: Users },
-    { label: 'Financeiro', path: '/financeiro', icon: Wallet },
+    { label: 'Financeiro', path: '/financeiro', icon: Wallet, adminOnly: true },
     { label: 'Torneios', path: '/torneios', icon: Trophy },
     { label: 'WhatsApp', path: '/whatsapp', icon: MessageCircle, extra: (c) => c.whatsapp === 'unknown' ? null : <SidebarMenuBadge className="gap-1.5 text-[10.5px] font-normal text-white/45"><span aria-hidden="true" className={cn('size-1.5 rounded-full', c.whatsapp === 'on' ? 'bg-lime-400' : 'bg-white/30')} />{c.whatsapp === 'on' ? 'on' : 'off'}</SidebarMenuBadge> },
   ] },
   { group: 'Conta', items: [
-    { label: 'Equipe e acessos', path: '/usuarios', icon: UserCog },
-    { label: 'Configurações', path: '/configuracoes', icon: Settings2 },
+    { label: 'Equipe e acessos', path: '/usuarios', icon: UserCog, adminOnly: true },
+    { label: 'Configurações', path: '/configuracoes', icon: Settings2, adminOnly: true },
   ] },
 ];
 
 export const allNavItems = navigation.flatMap((group) => group.items);
+
+/** A Recepção (papel "staff") não vê Financeiro, Equipe nem Configurações. */
+export const canSee = (item: NavItem, role: string | undefined) => !item.adminOnly || role === 'arena_admin';
+export const roleLabel = (role: string | undefined) => role === 'arena_admin' ? 'Administrador' : role === 'staff' ? 'Recepção' : 'Plataforma';
 
 export function AppLayout({ children }: { children: ReactNode }) {
   return <ShellProvider>
@@ -92,7 +96,7 @@ function AppSidebar() {
       </div>
     </SidebarHeader>
     <SidebarContent className="scrollbar-none gap-4 px-1 py-3">
-      {navigation.map((group) => <SidebarGroup key={group.group} className="py-0">
+      {navigation.map((group) => ({ ...group, items: group.items.filter((item) => canSee(item, user?.role)) })).filter((group) => group.items.length).map((group) => <SidebarGroup key={group.group} className="py-0">
         <SidebarGroupLabel className="px-3 text-[10.5px] font-semibold tracking-[0.08em] text-white/35 uppercase">{group.group}</SidebarGroupLabel>
         <SidebarGroupContent>
           <SidebarMenu className="gap-0.5">
@@ -122,7 +126,7 @@ function AppSidebar() {
         <span className="grid size-9 shrink-0 place-items-center rounded-full bg-lime-400/90 text-xs font-semibold text-brand-950">{initials(user?.name)}</span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] font-medium text-white">{user?.name}</span>
-          <span className="block truncate text-[11px] text-white/45">{user?.role === 'arena_admin' ? 'Administrador' : 'Equipe'} · {company}</span>
+          <span className="block truncate text-[11px] text-white/45">{roleLabel(user?.role)} · {company}</span>
         </span>
         <button type="button" onClick={() => void signOut()} aria-label="Sair" title="Sair" className="grid size-8 place-items-center rounded-md text-white/50 hover:bg-white/[0.08] hover:text-white focus-visible:outline-2 focus-visible:outline-brand-500">
           <LogOut className="size-4" aria-hidden="true" />

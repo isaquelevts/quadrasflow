@@ -29,6 +29,13 @@
       "when": 1790619643066,
       "tag": "0003_sour_franklin_richards",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790647198773,
+      "tag": "0004_fase3a_acessos",
+      "breakpoints": true
     }
   ]
 }

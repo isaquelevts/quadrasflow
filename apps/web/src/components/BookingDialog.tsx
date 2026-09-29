@@ -18,12 +18,12 @@ type EditableBooking = { id: string; customer_name: string; customer_phone?: str
 type Mode = 'booking' | 'block' | 'edit';
 type Props = {
   open: boolean; onOpenChange: (open: boolean) => void; courts: Court[]; weeklyHours: HoursDay[];
-  initialDate?: string; mode?: Mode; booking?: EditableBooking; initialCourtId?: string; initialStart?: string; onSaved: () => void;
+  initialDate?: string; mode?: Mode; booking?: EditableBooking; initialCourtId?: string; initialStart?: string; initialName?: string; initialPhone?: string; onSaved: () => void;
 };
 
 const range = (from: number, to: number, step = 30) => { const out: number[] = []; for (let t = from; t <= to; t += step) out.push(t); return out; };
 
-export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initialDate = todayKey(), mode: initialMode = 'booking', booking, initialCourtId, initialStart, onSaved }: Props) {
+export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initialDate = todayKey(), mode: initialMode = 'booking', booking, initialCourtId, initialStart, initialName, initialPhone, onSaved }: Props) {
   const [mode, setMode] = useState<Mode>(initialMode);
   const [date, setDate] = useState(initialDate);
   const [courtId, setCourtId] = useState('');
@@ -46,9 +46,9 @@ export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initial
     const s = booking ? minutesOf(booking.start_at) : initialStart ? minutesOfTime(initialStart) : 19 * 60;
     setStart(s);
     setEnd(booking ? minutesOf(booking.end_at) : s + 60);
-    setCustomerName(booking?.customer_name || ''); setPhone(booking?.customer_phone ? formatPhone(booking.customer_phone) : '');
+    setCustomerName(booking?.customer_name || initialName || ''); setPhone(booking?.customer_phone ? formatPhone(booking.customer_phone) : initialPhone ? formatPhone(initialPhone) : '');
     setReason(''); setError('');
-  }, [open, initialDate, courts, booking, initialCourtId, initialStart, initialMode]);
+  }, [open, initialDate, courts, booking, initialCourtId, initialStart, initialMode, initialName, initialPhone]);
 
   // Reservas e bloqueios do dia escolhido, para avisar do conflito antes de enviar.
   useEffect(() => {
@@ -75,9 +75,11 @@ export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initial
     const bookingHit = day.bookings.find((item) => item.court_id === courtId && item.status !== 'cancelled' && item.status !== 'monthly' && item.id !== booking?.id && overlaps(item.start_at, item.end_at));
     if (bookingHit) return { hard: true, text: `Conflito com reserva de ${bookingHit.customer_name} (${formatTime(bookingHit.start_at)}–${formatTime(bookingHit.end_at)}).` };
     const monthlyHit = day.bookings.find((item) => item.court_id === courtId && item.status === 'monthly' && overlaps(item.start_at, item.end_at));
-    if (monthlyHit) return { hard: false, text: `Atenção: horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
+    // Horário fixo de mensalista bloqueia como qualquer outra reserva (mesma regra da API e do bot).
+    if (monthlyHit && !isBlock) return { hard: true, text: `Conflito com o horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
+    if (monthlyHit) return { hard: false, text: `Atenção: este bloqueio cobre o horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
     return null;
-  }, [day, courtId, start, end, booking?.id]);
+  }, [day, courtId, start, end, booking?.id, isBlock]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError('');

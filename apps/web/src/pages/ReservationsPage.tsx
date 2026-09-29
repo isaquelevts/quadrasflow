@@ -42,6 +42,7 @@ export function ReservationsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
+  const [prefill, setPrefill] = useState<{ name?: string; phone?: string }>({});
   const [editing, setEditing] = useState<DayBooking | undefined>();
   const [detail, setDetail] = useState<DetailItem | null>(null);
   const [openAfterLoad, setOpenAfterLoad] = useState<string | null>(null);
@@ -64,7 +65,11 @@ export function ReservationsPage() {
   useEffect(() => {
     const data = params.get('data');
     if (isDateKey(data) && data !== date) setDate(data);
-    if (params.get('nova') === '1') { setCreateOpen(true); params.delete('nova'); setParams(params, { replace: true }); }
+    if (params.get('nova') === '1') {
+      // Vindo da ficha do cliente: já abre com nome e telefone.
+      setPrefill({ name: params.get('nome') || undefined, phone: params.get('tel') || undefined });
+      setCreateOpen(true); ['nova', 'nome', 'tel'].forEach((key) => params.delete(key)); setParams(params, { replace: true });
+    }
   }, [params]);
 
   const actions = useBookingActions({ slug, onChanged: () => { setSelection({}); void load(); } });
@@ -237,7 +242,7 @@ export function ReservationsPage() {
       <button type="button" tabIndex={selected.length ? 0 : -1} onClick={() => setSelection({})} aria-label="Limpar seleção" className="grid size-8 place-items-center rounded-md text-white/60 hover:bg-white/10"><X className="size-4" aria-hidden="true" /></button>
     </div>
 
-    <BookingDialog open={createOpen} onOpenChange={setCreateOpen} courts={activeCourts} weeklyHours={hours} initialDate={date} onSaved={() => void load()} />
+    <BookingDialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) setPrefill({}); }} courts={activeCourts} weeklyHours={hours} initialDate={date} initialName={prefill.name} initialPhone={prefill.phone} onSaved={() => void load()} />
     <BookingDialog open={Boolean(editing)} onOpenChange={(open) => { if (!open) setEditing(undefined); }} courts={activeCourts} weeklyHours={hours} initialDate={date} mode="edit" booking={editing} onSaved={() => { setEditing(undefined); void load(); }} />
     <BookingDetailSheet item={detail} onClose={() => setDetail(null)} busy={actions.busy}
       onEdit={(b) => { setDetail(null); setEditing(b); }}
