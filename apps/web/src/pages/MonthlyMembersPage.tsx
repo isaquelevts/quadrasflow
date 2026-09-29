@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { CalendarDays, ChevronLeft, ChevronRight, CircleCheck, CircleX, Clock, Hourglass, Info, LandPlot, LoaderCircle, Pause, Play, Plus, Receipt, Repeat, TrendingUp } from 'lucide-react';
+import { CalendarDays, ChevronLeft, ChevronRight, CircleCheck, CircleX, Clock, Hourglass, Info, LandPlot, LoaderCircle, Pause, Pencil, Play, Plus, Receipt, Repeat, TrendingUp } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@/auth/AuthProvider';
 import { addMonths, format, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { toast } from 'sonner';
@@ -20,7 +22,7 @@ import { durationLabel, errorMessage, formatCurrency, formatPhone, minutesOfTime
 import { cn } from '@/lib/utils';
 
 type Client = { id: string; name: string; phone: string | null };
-type Member = { id: string; client_name: string; phone: string | null; court_name: string; weekday: number; start_time: string; duration_minutes: number; amount_cents: number; status: 'active' | 'paused' | 'ended'; created_at: string };
+type Member = { id: string; courtId: string; client_name: string; phone: string | null; court_name: string; weekday: number; start_time: string; duration_minutes: number; amount_cents: number; status: 'active' | 'paused' | 'ended'; created_at: string };
 type Charge = { id: string; memberId: string; client_name: string; court_name: string; cycle: string; amount_cents: number; due_date: string; paid_at: string | null };
 
 const DAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
@@ -55,11 +57,15 @@ export function MonthlyMembersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [formOpen, setFormOpen] = useState(false);
+  const [editingMember, setEditingMember] = useState<Member | null>(null);
+  const isAdmin = useAuth().user?.role === 'arena_admin';
+  const navigate = useNavigate();
   const [showEnded, setShowEnded] = useState(false);
   const [confirm, setConfirm] = useState<Confirm>(null);
   const [busy, setBusy] = useState(false);
 
-  usePrimaryAction(() => setFormOpen(true));
+  // A Recepção só consulta mensalistas; para ela o "+" abre uma nova reserva.
+  usePrimaryAction(() => isAdmin ? setFormOpen(true) : navigate('/reservas?nova=1'));
 
   async function load() {
     setLoading(true); setError('');
@@ -99,7 +105,7 @@ export function MonthlyMembersPage() {
           <span className="flex h-10 flex-1 items-center justify-center gap-2 border-x px-4 font-medium whitespace-nowrap md:h-9" aria-live="polite"><CalendarDays className="size-4 text-muted-foreground" aria-hidden="true" /><span className="first-letter:uppercase">{monthLabel(cycle)}</span></span>
           <button type="button" onClick={() => setCycle(cycleOf(addMonths(monthDate(cycle), 1)))} aria-label="Próximo mês" className="grid size-10 place-items-center rounded-r-md hover:bg-muted md:size-9"><ChevronRight className="size-4" aria-hidden="true" /></button>
         </div>
-        <Button className="hidden md:inline-flex" onClick={() => setFormOpen(true)}><Plus /> Novo mensalista</Button>
+        {isAdmin && <Button className="hidden md:inline-flex" onClick={() => setFormOpen(true)}><Plus /> Novo mensalista</Button>}
       </>} />
     {error && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{error}</div>}
 
@@ -116,10 +122,10 @@ export function MonthlyMembersPage() {
           <h2 className="min-w-0 flex-1 text-[15px] font-semibold">Planos recorrentes <span className="ml-1 rounded-full bg-muted px-2 py-0.5 align-middle text-[11px] font-semibold text-muted-foreground">{active.length + paused.length}</span></h2>
           {ended.length > 0 && <Button variant="ghost" size="sm" onClick={() => setShowEnded((v) => !v)} aria-pressed={showEnded} aria-label={showEnded ? 'Ocultar encerrados' : `Mostrar encerrados (${ended.length})`}>{showEnded ? 'Ocultar encerrados' : <><span className="sm:hidden">Encerrados ({ended.length})</span><span className="hidden sm:inline">Mostrar encerrados ({ended.length})</span></>}</Button>}
         </div>
-        {visible.length ? <ul className="divide-y">{visible.map((m) => <PlanRow key={m.id} member={m} cycle={cycle} busy={busy}
+        {visible.length ? <ul className="divide-y">{visible.map((m) => <PlanRow key={m.id} member={m} cycle={cycle} busy={busy} isAdmin={isAdmin} onEdit={() => setEditingMember(m)}
           onPause={() => void setStatus(m, m.status === 'active' ? 'paused' : 'active', m.status === 'active' ? 'Plano pausado — horários liberados na agenda' : 'Plano retomado')}
           onEnd={() => setConfirm({ title: `Encerrar o plano de ${m.client_name}?`, text: 'Os horários futuros são liberados na agenda. As cobranças já pagas continuam no histórico.', action: 'Encerrar plano', danger: true, run: () => setStatus(m, 'ended', 'Plano encerrado') })} />)}</ul>
-          : <EmptyState icon={Repeat} title="Nenhum mensalista ainda" text="Cadastre um horário fixo semanal. A cobrança do mês é gerada automaticamente." action={<Button onClick={() => setFormOpen(true)}><Plus /> Novo mensalista</Button>} />}
+          : <EmptyState icon={Repeat} title="Nenhum mensalista ainda" text="Cadastre um horário fixo semanal. A cobrança do mês é gerada automaticamente." action={isAdmin ? <Button onClick={() => setFormOpen(true)}><Plus /> Novo mensalista</Button> : undefined} />}
       </Panel>
 
       <Panel>
@@ -138,15 +144,15 @@ export function MonthlyMembersPage() {
               <div className="mt-0.5 flex flex-wrap items-center gap-2"><ToneBadge tone={st.tone}>{st.label}</ToneBadge>{c.paid_at && <span className="text-[12px] text-muted-foreground">pago em {format(new Date(c.paid_at), 'dd/MM')}</span>}</div>
             </div>
             <div className="font-semibold tabular-nums">{formatCurrency(c.amount_cents)}</div>
-            {!c.paid_at && <Button disabled={busy} aria-label={`Marcar pago: ${c.client_name}`} onClick={() => setConfirm({ title: 'Registrar pagamento?', text: `${c.client_name} · ${formatCurrency(c.amount_cents)}. O valor entra no Financeiro como recebido e não pode ser desfeito por aqui.`, action: 'Marcar pago', run: () => run('Pagamento registrado', () => api(`/api/monthly-charges/${c.id}/paid`, { method: 'PATCH', body: '{}' })) })}>
+            {!c.paid_at && isAdmin && <Button disabled={busy} aria-label={`Marcar pago: ${c.client_name}`} onClick={() => setConfirm({ title: 'Registrar pagamento?', text: `${c.client_name} · ${formatCurrency(c.amount_cents)}. O valor entra no Financeiro como recebido e não pode ser desfeito por aqui.`, action: 'Marcar pago', run: () => run('Pagamento registrado', () => api(`/api/monthly-charges/${c.id}/paid`, { method: 'PATCH', body: '{}' })) })}>
               <CircleCheck /><span className="hidden sm:inline">Marcar pago</span></Button>}
           </li>;
         })}</ul> : <EmptyState icon={Receipt} title="Nenhuma cobrança neste mês" text={active.length ? 'As cobranças aparecem quando o mês é aberto.' : 'Não há mensalistas ativos para cobrar.'} />}
       </Panel>
     </>}
 
-    <MemberSheet open={formOpen} onOpenChange={setFormOpen} cycle={cycle} courts={courts.filter(isActiveCourt)} clients={clients}
-      onClientCreated={(client) => setClients((list) => [...list, client].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')))} onSaved={() => { setFormOpen(false); void load(); }} />
+    <MemberSheet open={formOpen || Boolean(editingMember)} member={editingMember} onOpenChange={(open) => { if (!open) { setFormOpen(false); setEditingMember(null); } }} cycle={cycle} courts={courts.filter(isActiveCourt)} clients={clients}
+      onClientCreated={(client) => setClients((list) => [...list, client].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')))} onSaved={() => { setFormOpen(false); setEditingMember(null); void load(); }} />
     <AlertDialog open={Boolean(confirm)} onOpenChange={(value) => { if (!value) setConfirm(null); }}>
       <AlertDialogContent>
         <AlertDialogHeader className="flex flex-row items-start gap-3 text-left">
@@ -162,7 +168,7 @@ export function MonthlyMembersPage() {
   </div>;
 }
 
-function PlanRow({ member: m, cycle, busy, onPause, onEnd }: { member: Member; cycle: string; busy: boolean; onPause: () => void; onEnd: () => void }) {
+function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd }: { member: Member; cycle: string; busy: boolean; isAdmin: boolean; onEdit: () => void; onPause: () => void; onEnd: () => void }) {
   const dates = datesIn(cycle, m.weekday), today = todayKey();
   const start = minutesOfTime(m.start_time), idle = m.status !== 'active';
   return <li className={cn('flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:px-5', idle && 'bg-muted/40')}>
@@ -189,7 +195,8 @@ function PlanRow({ member: m, cycle, busy, onPause, onEnd }: { member: Member; c
     </div>
     <div className="flex items-center gap-2 lg:justify-end">
       <div className="mr-2 flex-1 lg:flex-none lg:text-right"><div className="font-semibold tabular-nums">{formatCurrency(m.amount_cents)}<span className="text-[12px] font-normal text-muted-foreground">/mês</span></div><div className="text-[11.5px] text-muted-foreground">{durationLabel(m.duration_minutes)} por jogo</div></div>
-      {m.status !== 'ended' && <>
+      {m.status !== 'ended' && isAdmin && <>
+        <Button variant="outline" size="icon" disabled={busy} aria-label={`Editar plano de ${m.client_name}`} title="Editar" onClick={onEdit}><Pencil /></Button>
         <Button variant="outline" disabled={busy} onClick={onPause}>{m.status === 'active' ? <><Pause />Pausar</> : <><Play />Retomar</>}</Button>
         <Button variant="outline" size="icon" disabled={busy} className="text-rose-600 hover:bg-rose-50 hover:text-rose-700" aria-label={`Encerrar plano de ${m.client_name}`} title="Encerrar" onClick={onEnd}><CircleX /></Button>
       </>}
@@ -199,7 +206,7 @@ function PlanRow({ member: m, cycle, busy, onPause, onEnd }: { member: Member; c
 
 const TIMES = Array.from({ length: 36 }, (_, i) => 360 + i * 30); // 06:00 → 23:30
 
-function MemberSheet({ open, onOpenChange, cycle, courts, clients, onClientCreated, onSaved }: { open: boolean; onOpenChange: (open: boolean) => void; cycle: string; courts: Court[]; clients: Client[]; onClientCreated: (client: Client) => void; onSaved: () => void }) {
+function MemberSheet({ open, member, onOpenChange, cycle, courts, clients, onClientCreated, onSaved }: { open: boolean; member: Member | null; onOpenChange: (open: boolean) => void; cycle: string; courts: Court[]; clients: Client[]; onClientCreated: (client: Client) => void; onSaved: () => void }) {
   const [mode, setMode] = useState<'existing' | 'new'>('existing');
   const [clientId, setClientId] = useState('');
   const [clientName, setClientName] = useState('');
@@ -215,8 +222,12 @@ function MemberSheet({ open, onOpenChange, cycle, courts, clients, onClientCreat
   useEffect(() => {
     if (!open) return;
     setMode(clients.length ? 'existing' : 'new'); setClientId(''); setClientName(''); setClientPhone('');
-    setCourtId(courts[0]?.id || ''); setWeekday(1); setStart(19 * 60); setEnd(20 * 60); setAmount(''); setError('');
-  }, [open]);
+    if (member) {
+      const s = minutesOfTime(member.start_time);
+      setCourtId(member.courtId); setWeekday(member.weekday); setStart(s); setEnd(s + member.duration_minutes); setAmount((member.amount_cents / 100).toFixed(2).replace('.', ','));
+    } else { setCourtId(courts[0]?.id || ''); setWeekday(1); setStart(19 * 60); setEnd(20 * 60); setAmount(''); }
+    setError('');
+  }, [open, member]);
   useEffect(() => { if (end <= start || end - start > 240) setEnd(start + 60); }, [start, end]);
 
   const endOptions = useMemo(() => Array.from({ length: 7 }, (_, i) => start + 60 + i * 30).filter((t) => t <= 24 * 60), [start]);
@@ -227,6 +238,11 @@ function MemberSheet({ open, onOpenChange, cycle, courts, clients, onClientCreat
     event.preventDefault(); setError('');
     setSaving(true);
     try {
+      if (member) {
+        await api(`/api/monthly-members/${member.id}`, { method: 'PATCH', body: JSON.stringify({ courtId, weekday, startTime: timeOfMinutes(start), durationMinutes: end - start, amountCents: cents }) });
+        toast.success('Plano atualizado');
+        onSaved(); return;
+      }
       let id = clientId;
       if (mode === 'new') {
         const created = await api<{ client: Client }>('/api/clients', { method: 'POST', body: JSON.stringify({ name: clientName.trim(), phone: clientPhone }) });
@@ -239,14 +255,14 @@ function MemberSheet({ open, onOpenChange, cycle, courts, clients, onClientCreat
     finally { setSaving(false); }
   }
 
-  const ready = (mode === 'existing' ? Boolean(clientId) : clientName.trim().length >= 2) && Boolean(courtId) && cents > 0;
-  return <ResponsiveSheet open={open} onOpenChange={onOpenChange} title="Novo mensalista" description="Horário fixo toda semana, com cobrança mensal."
+  const ready = (member ? true : mode === 'existing' ? Boolean(clientId) : clientName.trim().length >= 2) && Boolean(courtId) && cents > 0;
+  return <ResponsiveSheet open={open} onOpenChange={onOpenChange} title={member ? 'Editar plano' : 'Novo mensalista'} description={member ? member.client_name : 'Horário fixo toda semana, com cobrança mensal.'}
     footer={<div className="grid grid-cols-2 gap-2">
       <Button type="button" variant="outline" className="h-10" onClick={() => onOpenChange(false)}>Cancelar</Button>
-      <Button type="submit" form="member-form" className="h-10" disabled={saving || !ready}>{saving && <LoaderCircle className="animate-spin" />}Cadastrar mensalista</Button>
+      <Button type="submit" form="member-form" className="h-10" disabled={saving || !ready}>{saving && <LoaderCircle className="animate-spin" />}{member ? 'Salvar alterações' : 'Cadastrar mensalista'}</Button>
     </div>}>
     <form id="member-form" className="space-y-4 px-5 py-4" onSubmit={(event) => void submit(event)}>
-      <div className="grid gap-1.5">
+      {member ? <p className="rounded-md bg-muted/70 px-3 py-2.5 text-[12.5px] text-muted-foreground">A alteração vale a partir de agora. Cobranças já geradas não mudam de valor.</p> : <div className="grid gap-1.5">
         <Label>Cliente</Label>
         <Segmented label="Tipo de cliente" value={mode} onChange={setMode} className="grid w-full grid-cols-2" options={[{ value: 'existing', label: 'Já cadastrado' }, { value: 'new', label: 'Novo cliente' }]} />
         {mode === 'existing'
@@ -255,7 +271,7 @@ function MemberSheet({ open, onOpenChange, cycle, courts, clients, onClientCreat
             <div className="grid gap-1.5"><Label htmlFor="member-name">Nome</Label><Input id="member-name" className="h-10" maxLength={100} value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="Nome do cliente" /></div>
             <div className="grid gap-1.5"><Label htmlFor="member-phone">WhatsApp <span className="font-normal text-muted-foreground">(opcional)</span></Label><Input id="member-phone" className="h-10" type="tel" inputMode="tel" value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} onBlur={() => setClientPhone(formatPhone(clientPhone))} placeholder="(00) 00000-0000" /></div>
           </div>}
-      </div>
+      </div>}
       <div className="grid gap-1.5"><Label>Quadra</Label><Select value={courtId} onValueChange={setCourtId}><SelectTrigger className="h-10 w-full" aria-label="Quadra"><SelectValue placeholder="Selecione a quadra" /></SelectTrigger><SelectContent>{courts.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} · {c.sport}</SelectItem>)}</SelectContent></Select></div>
       <fieldset className="grid gap-1.5"><legend className="mb-1.5 text-sm font-medium">Dia da semana</legend>
         <div className="grid grid-cols-7 gap-1" role="radiogroup" aria-label="Dia da semana">

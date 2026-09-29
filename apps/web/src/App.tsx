@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from '@/auth/AuthProvider';
-import { AppLayout, allNavItems } from '@/components/app/AppLayout';
+import { AppLayout, allNavItems, canSee } from '@/components/app/AppLayout';
 import { LoginPage } from '@/pages/LoginPage';
 import { OnboardingPage } from '@/pages/OnboardingPage';
 import { SignupPage } from '@/pages/SignupPage';
@@ -17,6 +17,7 @@ import { SettingsPage } from '@/pages/SettingsPage';
 import { WhatsAppPage } from '@/pages/WhatsAppPage';
 import { PublicArenaPage } from '@/pages/PublicArenaPage';
 import { UsersPage } from '@/pages/UsersPage';
+import { InvitePage } from '@/pages/InvitePage';
 import { PlatformPage } from '@/pages/PlatformPage';
 
 function ProtectedRoute() {
@@ -38,7 +39,7 @@ function MainLayout() {
   const pages: Record<string, ReactNode> = {
     '/': <DashboardPage />, '/agenda': <AgendaPage />, '/reservas': <ReservationsPage />, '/quadras': <CourtsPage />, '/clientes': <ClientsPage />, '/usuarios': <UsersPage />, '/financeiro': <FinancePage />, '/mensalistas': <MonthlyMembersPage />, '/torneios': <TournamentsPage />, '/configuracoes': <SettingsPage />, '/whatsapp': <WhatsAppPage />,
   };
-  return <AppLayout><Routes>{allNavItems.map((item) => <Route key={item.path} path={item.path} element={pages[item.path] || <Navigate to="/" replace />} />)}<Route path="/platform" element={<Navigate to="/" replace />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></AppLayout>;
+  return <AppLayout><Routes>{allNavItems.map((item) => <Route key={item.path} path={item.path} element={canSee(item, user?.role) && pages[item.path] ? pages[item.path] : <Navigate to="/" replace />} />)}<Route path="/platform" element={<Navigate to="/" replace />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></AppLayout>;
 }
 
 function AppRoutes() {
@@ -47,6 +48,7 @@ function AppRoutes() {
     <Route path="/cadastro" element={<SignupPage />} />
     <Route path="/a/:slug" element={<PublicArenaPage />} />
     <Route path="/avaliar/:token" element={<PublicArenaPage />} />
+    <Route path="/convite/:token" element={<InvitePage />} />
     <Route element={<ProtectedRoute />}>
       <Route path="/onboarding" element={<OnboardingPage />} />
       <Route path="/*" element={<MainLayout />} />

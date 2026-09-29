@@ -32,7 +32,7 @@ function parseToken(request: FastifyRequest) {
   const item = cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith('qf_session='));
   return item ? decodeURIComponent(item.slice('qf_session='.length)) : '';
 }
-async function createSession(userId: string, reply: FastifyReply) {
+export async function createSession(userId: string, reply: FastifyReply) {
   const token = randomBytes(32).toString('base64url');
   const now = new Date();
   await db.insert(sessions).values({ tokenHash: hash(token), userId, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 7 * 86400000).toISOString() });
@@ -62,6 +62,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: { code: 'AUTH_INVALID', message: 'E-mail ou senha não conferem.' } });
     }
     await createSession(row.user.id, reply);
+    await db.update(users).set({ lastLoginAt: new Date().toISOString() }).where(eq(users.id, row.user.id));
     return { user: { id: row.user.id, name: row.user.name, email: row.user.email, role: row.user.role, setupNeeded: Boolean(row.user.companyId && !row.onboardingCompleted), company: row.user.companyId ? { id: row.user.companyId, name: row.companyName!, slug: row.slug! } : null } };
   });
   app.post('/api/auth/register', { config: { rateLimit: { max: 5, timeWindow: 60 * 60 * 1000 } } }, async (request, reply) => {

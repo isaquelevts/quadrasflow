@@ -15,6 +15,7 @@ import { registerPublicRoutes } from './public.js';
 import { registerWhatsAppRoutes } from './whatsapp.js';
 import { registerPlatformRoutes } from './platform.js';
 import { registerUserRoutes } from './users.js';
+import { registerInviteRoutes } from './invites.js';
 import { processExpiredWhatsAppPix, processWhatsAppPixReminders, registerMercadoPagoRoutes } from './mercadopago.js';
 import { registerMediaRoutes } from './media.js';
 
@@ -66,6 +67,7 @@ const deliveryTimer=setInterval(()=>void processWhatsAppDeliveries().catch(error
 deliveryTimer.unref();
 await registerPlatformRoutes(app);
 await registerUserRoutes(app);
+await registerInviteRoutes(app);
 await registerMercadoPagoRoutes(app);
 app.addHook('onClose', async () => { clearInterval(whatsappReminderTimer); clearInterval(deliveryTimer); await databaseClient.end({ timeout: 5 }); });
 

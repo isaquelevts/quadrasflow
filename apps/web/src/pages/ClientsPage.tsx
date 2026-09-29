@@ -1,21 +1,22 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarCheck2, CalendarPlus, ChevronRight, LoaderCircle, MessageCircle, MessageSquareHeart, Repeat, Search, Star, UserPlus, UserSearch, Users } from 'lucide-react';
+import { CalendarCheck2, CalendarPlus, ChevronRight, LoaderCircle, MessageCircle, MessageSquareHeart, Pencil, Repeat, Search, Star, UserPlus, UserSearch, Users } from 'lucide-react';
 import { toast } from 'sonner';
 import { Avatar, EmptyState, PageHeader, Panel, StatCard } from '@/components/app/page';
 import { ResponsiveSheet } from '@/components/app/ResponsiveSheet';
 import { usePrimaryAction } from '@/components/app/shell-context';
-import { ToneBadge } from '@/components/app/status';
+import { BookingStatusBadge, ToneBadge, bookingStatus, toneDot, type BookingStatus } from '@/components/app/status';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
 import { fmtDate, todayKey, shiftKey } from '@/lib/arena';
-import { errorMessage, formatPhone, plural, whatsappLink } from '@/lib/format';
+import { errorMessage, formatCurrency, formatPhone, plural, whatsappLink } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
-type Client = { id: string; name: string; phone: string | null; created_at: string; bookings_count: number; last_booking_at: string | null };
+type Client = { id: string; name: string; phone: string | null; notes?: string; created_at: string; bookings_count: number; last_booking_at: string | null };
 type Member = { clientId: string; status: string; weekday: number; start_time: string; court_name: string };
 type Review = { id: string; customer_name: string; rating: number; comment: string; created_at: string };
 type Filter = 'all' | 'monthly' | 'with' | 'without';
@@ -120,7 +121,8 @@ export function ClientsPage() {
 
     <ReviewsPanel reviews={reviews} average={average} loading={loading} />
 
-    <ClientSheet client={viewing} plan={viewing ? planOf(viewing.id) : undefined} onClose={() => setViewing(null)} tags={viewing ? tags(viewing) : null} />
+    <ClientSheet client={viewing} plan={viewing ? planOf(viewing.id) : undefined} onClose={() => setViewing(null)} tags={viewing ? tags(viewing) : null}
+      onChanged={(updated) => { setViewing(updated); setClients((list) => list.map((c) => c.id === updated.id ? { ...c, ...updated } : c)); }} />
     <NewClientSheet open={creating} onOpenChange={setCreating} clients={clients} onSaved={() => { setCreating(false); void load(); }} />
   </div>;
 }
@@ -161,24 +163,73 @@ function Stars({ value, className }: { value: number; className?: string }) {
   </span>;
 }
 
-function ClientSheet({ client, plan, onClose, tags }: { client: Client | null; plan?: Member; onClose: () => void; tags: ReactNode }) {
+type HistoryItem = { id: string; start_at: string; end_at: string; status: string; amount_cents: number; court_name: string; cancel_reason: string };
+
+function ClientSheet({ client, plan, onClose, onChanged, tags }: { client: Client | null; plan?: Member; onClose: () => void; onChanged: (client: Client) => void; tags: ReactNode }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [notes, setNotes] = useState('');
+  const [history, setHistory] = useState<HistoryItem[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!client) return;
+    setEditing(false); setName(client.name); setPhone(client.phone ? formatPhone(client.phone) : ''); setNotes(client.notes || ''); setError(''); setHistory(null);
+    api<{ bookings: HistoryItem[] }>(`/api/clients/${client.id}/bookings`).then((data) => setHistory(data.bookings)).catch(() => setHistory([]));
+  }, [client?.id]);
+
+  async function save(patch: Record<string, string>, label: string) {
+    if (!client) return;
+    setSaving(true); setError('');
+    try {
+      const data = await api<{ client: Client }>(`/api/clients/${client.id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+      onChanged({ ...client, ...data.client }); setEditing(false); toast.success(label);
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setSaving(false); }
+  }
+
   const wa = whatsappLink(client?.phone);
   const reserveLink = client ? `/reservas?nova=1&nome=${encodeURIComponent(client.name)}${client.phone ? `&tel=${encodeURIComponent(client.phone)}` : ''}` : '/reservas';
+  const notesChanged = client ? notes !== (client.notes || '') : false;
   return <ResponsiveSheet open={Boolean(client)} onOpenChange={(open) => { if (!open) onClose(); }} title={client?.name}
     description={client && <span className="flex flex-wrap items-center gap-1.5">{client.phone && <span className="tabular-nums">{formatPhone(client.phone)}</span>}{tags}</span>}>
     {client && <div className="space-y-4 p-5">
-      <div className="grid grid-cols-2 gap-2">
-        {wa ? <Button asChild className="h-10"><a href={wa} target="_blank" rel="noreferrer"><MessageCircle /> WhatsApp</a></Button> : <Button className="h-10" disabled><MessageCircle /> Sem telefone</Button>}
+      {editing ? <form className="space-y-3 rounded-lg border p-3" onSubmit={(event) => { event.preventDefault(); void save({ name: name.trim(), phone }, 'Cliente atualizado'); }}>
+        <div className="grid gap-1.5"><Label htmlFor="edit-client-name">Nome</Label><Input id="edit-client-name" className="h-10" maxLength={100} value={name} onChange={(e) => setName(e.target.value)} /></div>
+        <div className="grid gap-1.5"><Label htmlFor="edit-client-phone">WhatsApp</Label><Input id="edit-client-phone" className="h-10" type="tel" inputMode="tel" value={phone} onChange={(e) => setPhone(e.target.value)} onBlur={() => setPhone(formatPhone(phone))} /></div>
+        <div className="grid grid-cols-2 gap-2"><Button type="button" variant="outline" onClick={() => { setEditing(false); setName(client.name); setPhone(client.phone ? formatPhone(client.phone) : ''); setError(''); }}>Cancelar</Button><Button type="submit" disabled={saving || name.trim().length < 2}>{saving && <LoaderCircle className="animate-spin" />}Salvar</Button></div>
+      </form> : <div className="grid grid-cols-3 gap-2">
+        {wa ? <Button asChild className="h-10"><a href={wa} target="_blank" rel="noreferrer"><MessageCircle /> WhatsApp</a></Button> : <Button className="h-10" disabled><MessageCircle /> Sem tel.</Button>}
         <Button asChild variant="outline" className="h-10"><Link to={reserveLink}><CalendarPlus /> Reservar</Link></Button>
-      </div>
+        <Button variant="outline" className="h-10" onClick={() => setEditing(true)}><Pencil /> Editar</Button>
+      </div>}
+      {error && <p role="alert" className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">{error}</p>}
       <div className="grid grid-cols-3 divide-x rounded-lg border text-center">
         <div className="py-3"><div className="text-lg font-semibold tabular-nums">{client.bookings_count}</div><div className="text-[11.5px] text-muted-foreground">reservas</div></div>
-        <div className="py-3"><div className="text-lg font-semibold tabular-nums">{client.last_booking_at ? `${client.last_booking_at.slice(8, 10)}/${client.last_booking_at.slice(5, 7)}` : '—'}</div><div className="text-[11.5px] text-muted-foreground">última reserva</div></div>
+        <div className="py-3"><div className="text-lg font-semibold tabular-nums">{history ? history.filter((h) => h.status === 'cancelled').length : '—'}</div><div className="text-[11.5px] text-muted-foreground">canceladas</div></div>
         <div className="py-3"><div className="text-lg font-semibold tabular-nums">{client.created_at.slice(8, 10)}/{client.created_at.slice(5, 7)}/{client.created_at.slice(2, 4)}</div><div className="text-[11.5px] text-muted-foreground">cliente desde</div></div>
       </div>
       {plan && <div className="flex items-center gap-2 rounded-lg border border-lime-300/60 bg-lime-300/15 px-3 py-2.5 text-[13px]"><Repeat className="size-4 text-lime-700" aria-hidden="true" />
         <span><b>Mensalista</b> · {WEEKDAYS[plan.weekday]} às {plan.start_time} · {plan.court_name}</span><Link to="/mensalistas" className="ml-auto font-medium whitespace-nowrap text-brand-700">Ver plano</Link></div>}
-      {client.last_booking_at && <p className="text-[12.5px] text-muted-foreground">Última reserva em {fmtDate(client.last_booking_at.slice(0, 10), "EEEE, d 'de' MMMM 'de' yyyy")}.</p>}
+      <div className="grid gap-1.5">
+        <Label htmlFor="client-notes" className="text-[12px] font-semibold tracking-wide text-muted-foreground uppercase">Observações</Label>
+        <Textarea id="client-notes" rows={3} maxLength={1000} placeholder="Ex.: prefere a quadra 2, traz o próprio time" value={notes} onChange={(e) => setNotes(e.target.value)} />
+        {notesChanged && <Button variant="outline" size="sm" className="justify-self-end" disabled={saving} onClick={() => void save({ notes }, 'Observações salvas')}>{saving && <LoaderCircle className="animate-spin" />}Salvar observações</Button>}
+      </div>
+      <div>
+        <div className="mb-2 text-[12px] font-semibold tracking-wide text-muted-foreground uppercase">Histórico</div>
+        {history === null ? <div className="grid min-h-20 place-items-center"><LoaderCircle className="animate-spin text-brand-600" aria-label="Carregando histórico" /></div>
+          : history.length ? <ol className="relative">{history.map((h, i) => <li key={h.id} className={cn('relative ml-1.5 pb-4 pl-6', i < history.length - 1 && 'border-l')}>
+            <span aria-hidden="true" className={cn('absolute top-1 -left-[5px] size-2.5 rounded-full ring-4 ring-white', toneDot[bookingStatus[h.status as BookingStatus]?.tone || 'gray'])} />
+            <div className="-mt-0.5 flex items-start justify-between gap-2">
+              <div><div className="font-medium tabular-nums capitalize">{fmtDate(h.start_at.slice(0, 10), 'EEE, dd/MM/yy')} · {h.start_at.slice(11, 16)}–{h.end_at.slice(11, 16)}</div>
+                <div className="text-[12px] text-muted-foreground">{h.court_name}{h.cancel_reason ? ` · motivo: ${h.cancel_reason}` : ''}</div></div>
+              <div className="text-right"><div className={cn('font-semibold tabular-nums', h.status === 'cancelled' && 'font-normal text-muted-foreground line-through')}>{formatCurrency(h.amount_cents)}</div><div className="mt-0.5"><BookingStatusBadge status={h.status} /></div></div>
+            </div></li>)}</ol>
+          : <div className="rounded-lg border border-dashed px-4 py-6 text-center text-[13px] text-muted-foreground">Nenhuma reserva avulsa ainda.</div>}
+      </div>
     </div>}
   </ResponsiveSheet>;
 }

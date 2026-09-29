@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
-import { Banknote, CalendarCheck2, CalendarDays, Clock, Gauge, LandPlot, LoaderCircle, Pencil, Plus } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { Banknote, CalendarCheck2, CalendarDays, Clock, Gauge, LandPlot, LoaderCircle, Pencil, Plus, Trash2 } from 'lucide-react';
 import { addDays, startOfWeek } from 'date-fns';
 import { toast } from 'sonner';
 import { ArenaImagePicker } from '@/components/ArenaImagePicker';
@@ -8,7 +8,12 @@ import { EmptyState, PageHeader, StatCard } from '@/components/app/page';
 import { ResponsiveSheet } from '@/components/app/ResponsiveSheet';
 import { usePrimaryAction } from '@/components/app/shell-context';
 import { ToneBadge } from '@/components/app/status';
+import { useAuth } from '@/auth/AuthProvider';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -32,8 +37,11 @@ export function CourtsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState<Court | 'new' | null>(null);
+  const isAdmin = useAuth().user?.role === 'arena_admin';
+  const navigate = useNavigate();
 
-  usePrimaryAction(() => setEditing('new'));
+  // Só o administrador cadastra quadra; para a Recepção o "+" segue para uma nova reserva.
+  usePrimaryAction(() => isAdmin ? setEditing('new') : navigate('/reservas?nova=1'));
 
   async function load() {
     setLoading(true); setError('');
@@ -49,6 +57,18 @@ export function CourtsPage() {
   }
   useEffect(() => { void load(); }, []);
 
+  async function toggle(court: Court, active: boolean) {
+    // Otimista: a chave muda na hora e volta se a API recusar.
+    setCourts((list) => list.map((c) => c.id === court.id ? { ...c, active: active ? 1 : 0 } : c));
+    try {
+      await api(`/api/courts/${court.id}/status`, { method: 'PATCH', body: JSON.stringify({ active }) });
+      toast.success(active ? `${court.name} voltou a aceitar reservas` : `${court.name} pausada — some do bot e não aceita novas reservas`);
+    } catch (cause) {
+      setCourts((list) => list.map((c) => c.id === court.id ? { ...c, active: court.active } : c));
+      toast.error(errorMessage(cause));
+    }
+  }
+
   const opening = openWindow(hours, todayKey());
   const active = courts.filter(isActiveCourt);
   const avgPrice = active.length ? active.reduce((sum, c) => sum + c.price_cents, 0) / active.length : 0;
@@ -61,7 +81,7 @@ export function CourtsPage() {
 
   return <div className="space-y-4 lg:space-y-5">
     <PageHeader title="Quadras" description="Modalidades, preços e ocupação de hoje."
-      actions={<Button className="hidden md:inline-flex" onClick={() => setEditing('new')}><Plus /> Adicionar quadra</Button>} />
+      actions={isAdmin ? <Button className="hidden md:inline-flex" onClick={() => setEditing('new')}><Plus /> Adicionar quadra</Button> : undefined} />
     {error && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{error}</div>}
 
     {loading && !courts.length ? <div className="grid min-h-60 place-items-center"><LoaderCircle className="animate-spin text-brand-600" aria-label="Carregando" /></div> : <>
@@ -73,20 +93,20 @@ export function CourtsPage() {
       </section>
 
       {courts.length ? <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {courts.map((court) => <CourtCard key={court.id} court={court} today={today} opening={opening} occ={occOf(court.id)} onEdit={() => setEditing(court)} />)}
-        <button type="button" onClick={() => setEditing('new')} className="flex min-h-[220px] flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed text-muted-foreground transition hover:border-brand-400 hover:bg-brand-50/50 hover:text-brand-700 focus-visible:outline-2 focus-visible:outline-brand-500">
+        {courts.map((court) => <CourtCard key={court.id} court={court} today={today} opening={opening} occ={occOf(court.id)} isAdmin={isAdmin} onEdit={() => setEditing(court)} onToggle={(active) => void toggle(court, active)} />)}
+        {isAdmin && <button type="button" onClick={() => setEditing('new')} className="flex min-h-[220px] flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed text-muted-foreground transition hover:border-brand-400 hover:bg-brand-50/50 hover:text-brand-700 focus-visible:outline-2 focus-visible:outline-brand-500">
           <span className="grid size-12 place-items-center rounded-full border bg-white shadow-xs"><Plus className="size-5" aria-hidden="true" /></span>
           <span className="font-medium">Adicionar quadra</span>
           <span className="max-w-[220px] text-center text-[12.5px]">Cadastre modalidade, preço e foto.</span>
-        </button>
-      </section> : <div className="rounded-xl border bg-card shadow-card"><EmptyState icon={LandPlot} title="Nenhuma quadra cadastrada" text="Adicione uma quadra para começar a receber reservas." action={<Button onClick={() => setEditing('new')}><Plus /> Adicionar quadra</Button>} /></div>}
+        </button>}
+      </section> : <div className="rounded-xl border bg-card shadow-card"><EmptyState icon={LandPlot} title="Nenhuma quadra cadastrada" text={isAdmin ? 'Adicione uma quadra para começar a receber reservas.' : 'O administrador da arena cadastra as quadras.'} action={isAdmin ? <Button onClick={() => setEditing('new')}><Plus /> Adicionar quadra</Button> : undefined} /></div>}
     </>}
 
     <CourtSheet court={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void load(); }} />
   </div>;
 }
 
-function CourtCard({ court, today, opening, occ, onEdit }: { court: Court; today: DayData | null; opening: ReturnType<typeof openWindow>; occ: number; onEdit: () => void }) {
+function CourtCard({ court, today, opening, occ, isAdmin, onEdit, onToggle }: { court: Court; today: DayData | null; opening: ReturnType<typeof openWindow>; occ: number; isAdmin: boolean; onEdit: () => void; onToggle: (active: boolean) => void }) {
   const active = isActiveCourt(court);
   const bookings = today ? activeBookings(today.bookings).filter((b) => b.court_id === court.id) : [];
   const blocks = today ? today.blocks.filter((b) => b.court_id === court.id) : [];
@@ -102,7 +122,7 @@ function CourtCard({ court, today, opening, occ, onEdit }: { court: Court; today
       {court.photo_url ? <img src={court.photo_url} alt={`Foto da quadra ${court.name}`} className="absolute inset-0 size-full object-cover" /> : <CourtArt sport={court.sport} />}
       <div className="absolute inset-x-0 top-0 flex items-start justify-between p-3">
         <span className="inline-flex items-center gap-1.5 rounded-md bg-white/90 px-2 py-1 text-[11.5px] font-medium shadow-xs backdrop-blur">{court.sport}</span>
-        <ToneBadge tone={active ? 'green' : 'gray'} className="bg-white/90">{active ? 'Ativa' : 'Inativa'}</ToneBadge>
+        <ToneBadge tone={active ? 'green' : 'gray'} className="bg-white/90">{active ? 'Aberta' : 'Pausada'}</ToneBadge>
       </div>
     </div>
     <div className="flex flex-1 flex-col p-4 lg:p-5">
@@ -122,8 +142,13 @@ function CourtCard({ court, today, opening, occ, onEdit }: { court: Court; today
         <div className="mt-1 flex justify-between text-[10.5px] text-muted-foreground tabular-nums"><span>{opening.openTime}</span><span>{timeOfMinutes(Math.floor((opening.open + opening.close) / 60 / 2) * 60)}</span><span>{opening.closeTime}</span></div>
       </div>}
       <div className="-mx-4 mt-auto flex items-center justify-end gap-2 border-t px-4 pt-4 lg:-mx-5 lg:px-5" style={{ marginTop: opening ? undefined : '1rem' }}>
+        {isAdmin && <label className="mr-auto flex min-w-0 cursor-pointer items-center gap-2 text-[13px]">
+          <Switch checked={active} onCheckedChange={onToggle} aria-label={active ? `Pausar ${court.name}` : `Reabrir ${court.name}`} />
+          <span className="truncate">{active ? 'Aberta' : 'Pausada'}</span>
+        </label>}
+        {!isAdmin && !active && <span className="mr-auto text-[12.5px] text-muted-foreground">Pausada pelo administrador</span>}
         <Button asChild variant="outline" size="icon" aria-label={`Ver ${court.name} na agenda`} title="Ver na agenda"><Link to="/agenda"><CalendarDays /></Link></Button>
-        <Button variant="outline" onClick={onEdit}><Pencil /> Editar</Button>
+        {isAdmin && <Button variant="outline" onClick={onEdit}><Pencil /> Editar</Button>}
       </div>
     </div>
   </article>;
@@ -155,6 +180,7 @@ function CourtSheet({ court, onClose, onSaved }: { court: Court | 'new' | null; 
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const sports = useMemo(() => editing && !SPORTS.includes(editing.sport) ? [editing.sport, ...SPORTS] : SPORTS, [editing]);
 
   useEffect(() => {
@@ -193,7 +219,27 @@ function CourtSheet({ court, onClose, onSaved }: { court: Court | 'new' | null; 
         <div className="relative"><span className="absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground">R$</span><Input id="court-price" className="h-10 pl-9 tabular-nums" inputMode="decimal" required value={price} onChange={(event) => setPrice(event.target.value)} /></div>
         <span className="text-[12px] text-muted-foreground">Usado quando a tabela de preços da arena não cobre o horário.</span></div>
       <p className="rounded-md bg-muted/70 px-3 py-2.5 text-[12.5px] text-muted-foreground">O horário de funcionamento vale para todas as quadras e é ajustado em Configurações.</p>
+      {editing && <div className="border-t pt-4">
+        <Button type="button" variant="outline" className="h-10 w-full border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 hover:text-rose-800" onClick={() => setConfirmDelete(true)}><Trash2 /> Excluir quadra</Button>
+        <p className="mt-1.5 text-[12px] text-muted-foreground">Só é possível excluir uma quadra sem reservas nem mensalistas. Para parar de receber reservas, use a chave Aberta/Pausada no card.</p>
+      </div>}
       {error && <p role="alert" className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">{error}</p>}
     </form>
+    <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+      <AlertDialogContent>
+        <AlertDialogHeader className="flex flex-row items-start gap-3 text-left">
+          <span className="grid size-10 shrink-0 place-items-center rounded-full bg-rose-50 text-rose-600"><Trash2 className="size-5" aria-hidden="true" /></span>
+          <div className="space-y-1"><AlertDialogTitle>Excluir {editing?.name}?</AlertDialogTitle><AlertDialogDescription>A quadra sai da agenda e do bot. Esta ação não pode ser desfeita.</AlertDialogDescription></div>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="grid grid-cols-2 gap-2 sm:flex">
+          <AlertDialogCancel>Voltar</AlertDialogCancel>
+          <AlertDialogAction className="bg-rose-600 text-white hover:bg-rose-700" onClick={async (event) => {
+            event.preventDefault(); setConfirmDelete(false);
+            try { await api(`/api/courts/${editing!.id}`, { method: 'DELETE' }); toast.success('Quadra excluída'); onSaved(); }
+            catch (cause) { setError(errorMessage(cause)); }
+          }}>Excluir quadra</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </ResponsiveSheet>;
 }

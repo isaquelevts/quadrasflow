@@ -22,7 +22,9 @@ function validImageReference(value: string) { return /^https:\/\//i.test(value) 
 function validDay(value: unknown): string { const day = String(value ?? ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(`${day}T12:00:00Z`))) throw fail(400, 'Data inválida.'); return day; }
 function iso(value: unknown) { const date = new Date(String(value ?? '')); if (Number.isNaN(date.valueOf())) throw fail(400, 'Confira a data e o horário.'); return date.toISOString(); }
 function spDay(date = new Date()) { return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(date); }
-function toClient(row: typeof clients.$inferSelect) { return { id: row.id, name: row.name, phone: row.phone, created_at: row.createdAt }; }
+function toClient(row: typeof clients.$inferSelect) { return { id: row.id, name: row.name, phone: row.phone, notes: row.notes, created_at: row.createdAt }; }
+/** Telefone comparável: só dígitos e sem o 55 do Brasil. */
+const phoneKey = (value: string | null | undefined) => (value || '').replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '');
 function toCourt(row: typeof courts.$inferSelect) { return { id: row.id, name: row.name, sport: row.sport, price_cents: row.priceCents, photo_url: row.photoUrl, active: row.active ? 1 : 0 }; }
 function toHour(row: typeof companyHours.$inferSelect) { return { weekday: row.weekday, is_open: row.isOpen ? 1 : 0, open_time: row.openTime, close_time: row.closeTime }; }
 async function audit(companyId: string, userId: string, action: string, entity: string, entityId?: string, details: Record<string, unknown> = {}) { await db.insert(appAudit).values({ id: randomUUID(), companyId, userId, action, entity, entityId: entityId || null, details, createdAt: new Date().toISOString() }); }
@@ -144,10 +146,61 @@ export async function registerArenaRoutes(app: FastifyInstance) {
   app.post('/api/clients', auth, async (request, reply) => {
     const user = userOf(request), companyId = companyOf(request), body = bodyOf(request), name = text(body.name, 'o nome do cliente'), phone = digits(body.phone);
     if (phone && (phone.length < 10 || phone.length > 15)) throw fail(400, 'Informe um telefone com DDD.');
-    const row = { id: randomUUID(), companyId, name, phone: phone || null, createdAt: new Date().toISOString() };
+    await assertPhoneFree(companyId, phone);
+    const row = { id: randomUUID(), companyId, name, phone: phone || null, notes: String(body.notes ?? '').slice(0, 1000), createdAt: new Date().toISOString() };
     try { await db.insert(clients).values(row); } catch (cause) { if (isUniqueViolation(cause)) throw fail(409, 'Esse cliente já está cadastrado.'); throw cause; }
     await audit(companyId, user.id, 'client.created', 'client', row.id);
     return reply.code(201).send({ client: { ...toClient(row), bookings_count: 0, last_booking_at: null } });
+  });
+  async function assertPhoneFree(companyId: string, phone: string, ignoreClientId?: string) {
+    if (!phone) return;
+    const key = phoneKey(phone);
+    const rows = await db.select({ id: clients.id, name: clients.name, phone: clients.phone }).from(clients).where(eq(clients.companyId, companyId));
+    const other = rows.find((c) => c.id !== ignoreClientId && phoneKey(c.phone) === key);
+    if (other) throw fail(409, `Esse telefone já pertence a ${other.name}.`);
+  }
+  app.patch('/api/clients/:id', auth, async (request) => {
+    const user = userOf(request), companyId = companyOf(request), { id } = request.params as { id: string }, body = bodyOf(request);
+    const current = (await db.select().from(clients).where(and(eq(clients.id, id), eq(clients.companyId, companyId))).limit(1))[0];
+    if (!current) throw fail(404, 'Cliente não encontrado.');
+    const name = body.name === undefined ? current.name : text(body.name, 'o nome do cliente');
+    const phone = body.phone === undefined ? (current.phone || '') : digits(body.phone);
+    if (phone && (phone.length < 10 || phone.length > 15)) throw fail(400, 'Informe um telefone com DDD.');
+    if (phone !== (current.phone || '')) await assertPhoneFree(companyId, phone, id);
+    const notes = body.notes === undefined ? current.notes : String(body.notes).slice(0, 1000);
+    const rows = await db.update(clients).set({ name, phone: phone || null, notes }).where(and(eq(clients.id, id), eq(clients.companyId, companyId))).returning();
+    await audit(companyId, user.id, 'client.updated', 'client', id);
+    return { client: toClient(rows[0]!) };
+  });
+  app.get('/api/clients/:id/bookings', auth, async (request) => {
+    const companyId = companyOf(request), { id } = request.params as { id: string };
+    const client = (await db.select({ id: clients.id }).from(clients).where(and(eq(clients.id, id), eq(clients.companyId, companyId))).limit(1))[0];
+    if (!client) throw fail(404, 'Cliente não encontrado.');
+    const rows = await db.select({ booking: bookings, courtName: courts.name }).from(bookings).innerJoin(courts, eq(bookings.courtId, courts.id))
+      .where(and(eq(bookings.companyId, companyId), eq(bookings.clientId, id))).orderBy(desc(bookings.startAt)).limit(100);
+    return { bookings: rows.map(({ booking: b, courtName }) => ({ id: b.id, start_at: b.startAt, end_at: b.endAt, status: b.status, amount_cents: b.amountCents, court_name: courtName, cancel_reason: b.cancelReason })) };
+  });
+  app.patch('/api/courts/:id/status', auth, async (request) => {
+    const user = adminOf(request), companyId = companyOf(request), { id } = request.params as { id: string }, active = bodyOf(request).active;
+    if (typeof active !== 'boolean') throw fail(400, 'Informe se a quadra fica aberta ou pausada.');
+    const rows = await db.update(courts).set({ active }).where(and(eq(courts.id, id), eq(courts.companyId, companyId))).returning();
+    if (!rows[0]) throw fail(404, 'Quadra não encontrada.');
+    await audit(companyId, user.id, active ? 'court.activated' : 'court.paused', 'court', id);
+    return { court: toCourt(rows[0]) };
+  });
+  app.delete('/api/courts/:id', auth, async (request) => {
+    const user = adminOf(request), companyId = companyOf(request), { id } = request.params as { id: string };
+    // Excluir apaga em cascata reservas e mensalistas; por isso só é permitido para quadra sem histórico.
+    const [court, booking, member] = await Promise.all([
+      db.select({ id: courts.id }).from(courts).where(and(eq(courts.id, id), eq(courts.companyId, companyId))).limit(1),
+      db.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, id))).limit(1),
+      db.select({ id: monthlyMembers.id }).from(monthlyMembers).where(and(eq(monthlyMembers.companyId, companyId), eq(monthlyMembers.courtId, id))).limit(1),
+    ]);
+    if (!court.length) throw fail(404, 'Quadra não encontrada.');
+    if (booking.length || member.length) throw fail(409, 'Esta quadra tem reservas ou mensalistas registrados. Pause a quadra em vez de excluir, para manter o histórico.');
+    await db.delete(courts).where(and(eq(courts.id, id), eq(courts.companyId, companyId)));
+    await audit(companyId, user.id, 'court.deleted', 'court', id);
+    return { ok: true };
   });
 
   app.get('/api/dashboard', auth, async (request) => {

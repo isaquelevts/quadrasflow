@@ -13,6 +13,7 @@ const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
   const auth = routes(app);
   app.get('/api/finance', auth, async (request) => {
+    adminOf(request); // Financeiro é só do administrador; a Recepção não vê.
     const companyId = companyOf(request), q = request.query as { from?: string; to?: string }, today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date()), from = q.from || `${today.slice(0, 7)}-01`, to = q.to || today;
     if (!datePattern.test(from) || !datePattern.test(to) || from > to) throw fail(400, 'Confira o período do relatório.');
     const entries = await db.select().from(financeEntries).where(and(eq(financeEntries.companyId, companyId), gte(financeEntries.dueDate, from), lte(financeEntries.dueDate, to))).orderBy(sql`${financeEntries.dueDate} DESC`, sql`${financeEntries.createdAt} DESC`);
@@ -50,19 +51,37 @@ export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
     const chargeRows = await db.select({ charge: monthlyCharges, clientId: monthlyMembers.clientId, courtId: monthlyMembers.courtId, clientName: clients.name, courtName: courts.name }).from(monthlyCharges).innerJoin(monthlyMembers, eq(monthlyCharges.memberId, monthlyMembers.id)).innerJoin(clients, eq(monthlyMembers.clientId, clients.id)).innerJoin(courts, eq(monthlyMembers.courtId, courts.id)).where(and(eq(monthlyCharges.companyId, companyId), eq(monthlyCharges.cycle, cycle))).orderBy(asc(clients.name));
     return { cycle, members: members.map(({ member: m, clientName, phone, courtName }) => ({ ...m, client_name: clientName, phone, court_name: courtName, weekday: m.weekday, start_time: m.startTime, duration_minutes: m.durationMinutes, amount_cents: m.amountCents, created_at: m.createdAt })), charges: chargeRows.map(({ charge: c, clientName, courtName, clientId, courtId }) => ({ ...c, client_id: clientId, court_id: courtId, client_name: clientName, court_name: courtName, amount_cents: c.amountCents, due_date: c.dueDate, paid_at: c.paidAt })) };
   });
-  app.post('/api/monthly-members', auth, async (request, reply) => {
-    const user = adminOf(request), companyId = companyOf(request), b = bodyOf(request), clientId = String(b.clientId || ''), courtId = String(b.courtId || ''), weekday = Number(b.weekday), startTime = String(b.startTime || ''), durationMinutes = Number(b.durationMinutes), amountCents = Math.round(Number(b.amountCents));
-    const client = (await db.select().from(clients).where(and(eq(clients.id, clientId), eq(clients.companyId, companyId))).limit(1))[0], court = (await db.select().from(courts).where(and(eq(courts.id, courtId), eq(courts.companyId, companyId), eq(courts.active, true))).limit(1))[0];
-    if (!client || !court) throw fail(404, 'Cliente ou quadra não encontrado.');
+  // Mesma validação para cadastrar e editar: dia/horário, funcionamento da arena, outro mensalista e agenda dos próximos 90 dias.
+  async function validateMonthlySlot(companyId: string, input: Record<string, unknown>, ignoreMemberId?: string) {
+    const courtId = String(input.courtId || ''), weekday = Number(input.weekday), startTime = String(input.startTime || ''), durationMinutes = Number(input.durationMinutes), amountCents = Math.round(Number(input.amountCents));
+    const court = (await db.select().from(courts).where(and(eq(courts.id, courtId), eq(courts.companyId, companyId), eq(courts.active, true))).limit(1))[0];
+    if (!court) throw fail(404, 'Quadra não encontrada ou pausada.');
     if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6 || !/^([01]\d|2[0-3]):(00|30)$/.test(startTime) || !Number.isInteger(durationMinutes) || durationMinutes < 60 || durationMinutes > 240 || durationMinutes % 30 || !Number.isInteger(amountCents) || amountCents <= 0) throw fail(400, 'Confira dia, horário, duração e valor do mensalista.');
     const startMin = Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)), endMin = startMin + durationMinutes, hours = (await db.select().from(companyHours).where(and(eq(companyHours.companyId, companyId), eq(companyHours.weekday, weekday))).limit(1))[0];
     if (!hours?.isOpen || startTime < hours.openTime || endMin > Number(hours.closeTime.slice(0, 2)) * 60 + Number(hours.closeTime.slice(3))) throw fail(400, 'O horário recorrente fica fora do funcionamento da arena.');
     const existing = await db.select().from(monthlyMembers).where(and(eq(monthlyMembers.companyId, companyId), eq(monthlyMembers.courtId, courtId), eq(monthlyMembers.weekday, weekday), eq(monthlyMembers.status, 'active')));
-    if (existing.some((m) => { const start = Number(m.startTime.slice(0, 2)) * 60 + Number(m.startTime.slice(3)); return start < endMin && start + m.durationMinutes > startMin; })) throw fail(409, 'Já existe mensalista nesse horário recorrente.');
+    if (existing.some((m) => { if (m.id === ignoreMemberId) return false; const start = Number(m.startTime.slice(0, 2)) * 60 + Number(m.startTime.slice(3)); return start < endMin && start + m.durationMinutes > startMin; })) throw fail(409, 'Já existe mensalista nesse horário recorrente.');
     const today = new Date(`${new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date())}T12:00:00Z`), end = new Date(today); end.setUTCDate(end.getUTCDate() + 90); while (today.getUTCDay() !== weekday) today.setUTCDate(today.getUTCDate() + 1);
     const candidates: string[] = []; for (const cursor = new Date(today); cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 7)) candidates.push(cursor.toISOString().slice(0, 10));
     for (const day of candidates) { const from = `${day}T${startTime}:00.000Z`, to = new Date(Date.parse(from) + durationMinutes * 60000).toISOString(); const [conflict, block] = await Promise.all([db.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, courtId), ne(bookings.status, 'cancelled'), sql`${bookings.startAt} < ${to}`, sql`${bookings.endAt} > ${from}`)).limit(1), db.select({ id: blockedSlots.id }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), sql`${blockedSlots.startAt} < ${to}`, sql`${blockedSlots.endAt} > ${from}`)).limit(1)]); if (conflict.length || block.length) throw fail(409, `O horário recorrente conflita com a agenda em ${day}.`); }
-    const id = randomUUID(), createdAt = new Date().toISOString(); await db.insert(monthlyMembers).values({ id, companyId, clientId, courtId, weekday, startTime, durationMinutes, amountCents, status: 'active', createdAt }); await audit(companyId, user.id, 'monthly_member.created', 'monthly_member', id); return reply.code(201).send({ id });
+    return { courtId, weekday, startTime, durationMinutes, amountCents };
+  }
+  app.post('/api/monthly-members', auth, async (request, reply) => {
+    const user = adminOf(request), companyId = companyOf(request), b = bodyOf(request), clientId = String(b.clientId || '');
+    const client = (await db.select().from(clients).where(and(eq(clients.id, clientId), eq(clients.companyId, companyId))).limit(1))[0];
+    if (!client) throw fail(404, 'Cliente não encontrado.');
+    const slot = await validateMonthlySlot(companyId, b);
+    const id = randomUUID(), createdAt = new Date().toISOString(); await db.insert(monthlyMembers).values({ id, companyId, clientId, ...slot, status: 'active', createdAt }); await audit(companyId, user.id, 'monthly_member.created', 'monthly_member', id); return reply.code(201).send({ id });
+  });
+  app.patch('/api/monthly-members/:id', auth, async (request) => {
+    const user = adminOf(request), companyId = companyOf(request), { id } = request.params as { id: string };
+    const current = (await db.select().from(monthlyMembers).where(and(eq(monthlyMembers.id, id), eq(monthlyMembers.companyId, companyId))).limit(1))[0];
+    if (!current) throw fail(404, 'Mensalista não encontrado.');
+    if (current.status === 'ended') throw fail(409, 'Um plano encerrado não pode ser editado.');
+    const slot = await validateMonthlySlot(companyId, bodyOf(request), id);
+    await db.update(monthlyMembers).set(slot).where(and(eq(monthlyMembers.id, id), eq(monthlyMembers.companyId, companyId)));
+    await audit(companyId, user.id, 'monthly_member.updated', 'monthly_member', id, { before: { courtId: current.courtId, weekday: current.weekday, startTime: current.startTime, durationMinutes: current.durationMinutes, amountCents: current.amountCents } });
+    return { ok: true };
   });
   app.patch('/api/monthly-members/:id/status', auth, async (request) => { const user = adminOf(request), companyId = companyOf(request), { id } = request.params as { id: string }, status = String(bodyOf(request).status || ''); if (!['active', 'paused', 'ended'].includes(status)) throw fail(400, 'Estado do mensalista inválido.'); const result = await db.update(monthlyMembers).set({ status }).where(and(eq(monthlyMembers.id, id), eq(monthlyMembers.companyId, companyId))).returning({ id: monthlyMembers.id }); if (!result.length) throw fail(404, 'Mensalista não encontrado.'); await audit(companyId, user.id, `monthly_member.${status}`, 'monthly_member', id); return { ok: true }; });
   app.patch('/api/monthly-charges/:id/paid', auth, async (request) => {
