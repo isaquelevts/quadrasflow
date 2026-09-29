@@ -1,24 +1,30 @@
-import type { ReactNode } from 'react';
+import { Suspense, lazy, type ReactNode } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from '@/auth/AuthProvider';
 import { AppLayout, allNavItems, canSee } from '@/components/app/AppLayout';
-import { LoginPage } from '@/pages/LoginPage';
-import { OnboardingPage } from '@/pages/OnboardingPage';
-import { SignupPage } from '@/pages/SignupPage';
-import { DashboardPage } from '@/pages/DashboardPage';
-import { AgendaPage } from '@/pages/AgendaPage';
-import { ReservationsPage } from '@/pages/ReservationsPage';
-import { CourtsPage } from '@/pages/CourtsPage';
-import { ClientsPage } from '@/pages/ClientsPage';
-import { FinancePage } from '@/pages/FinancePage';
-import { MonthlyMembersPage } from '@/pages/MonthlyMembersPage';
-import { TournamentsPage } from '@/pages/TournamentsPage';
-import { SettingsPage } from '@/pages/SettingsPage';
-import { WhatsAppPage } from '@/pages/WhatsAppPage';
-import { PublicArenaPage } from '@/pages/PublicArenaPage';
-import { UsersPage } from '@/pages/UsersPage';
-import { InvitePage } from '@/pages/InvitePage';
-import { PlatformPage } from '@/pages/PlatformPage';
+
+// Cada tela é carregada só quando é aberta (divide o JavaScript em partes menores).
+const LoginPage = lazy(() => import('@/pages/LoginPage').then((m) => ({ default: m.LoginPage })));
+const OnboardingPage = lazy(() => import('@/pages/OnboardingPage').then((m) => ({ default: m.OnboardingPage })));
+const SignupPage = lazy(() => import('@/pages/SignupPage').then((m) => ({ default: m.SignupPage })));
+const DashboardPage = lazy(() => import('@/pages/DashboardPage').then((m) => ({ default: m.DashboardPage })));
+const AgendaPage = lazy(() => import('@/pages/AgendaPage').then((m) => ({ default: m.AgendaPage })));
+const ReservationsPage = lazy(() => import('@/pages/ReservationsPage').then((m) => ({ default: m.ReservationsPage })));
+const CourtsPage = lazy(() => import('@/pages/CourtsPage').then((m) => ({ default: m.CourtsPage })));
+const ClientsPage = lazy(() => import('@/pages/ClientsPage').then((m) => ({ default: m.ClientsPage })));
+const FinancePage = lazy(() => import('@/pages/FinancePage').then((m) => ({ default: m.FinancePage })));
+const MonthlyMembersPage = lazy(() => import('@/pages/MonthlyMembersPage').then((m) => ({ default: m.MonthlyMembersPage })));
+const TournamentsPage = lazy(() => import('@/pages/TournamentsPage').then((m) => ({ default: m.TournamentsPage })));
+const SettingsPage = lazy(() => import('@/pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const WhatsAppPage = lazy(() => import('@/pages/WhatsAppPage').then((m) => ({ default: m.WhatsAppPage })));
+const PublicArenaPage = lazy(() => import('@/pages/PublicArenaPage').then((m) => ({ default: m.PublicArenaPage })));
+const UsersPage = lazy(() => import('@/pages/UsersPage').then((m) => ({ default: m.UsersPage })));
+const InvitePage = lazy(() => import('@/pages/InvitePage').then((m) => ({ default: m.InvitePage })));
+const PlatformPage = lazy(() => import('@/pages/PlatformPage').then((m) => ({ default: m.PlatformPage })));
+
+function PageFallback() {
+  return <div className="grid min-h-[50vh] place-items-center text-sm text-muted-foreground" role="status">Carregando…</div>;
+}
 
 function ProtectedRoute() {
   const { user, loading } = useAuth();
@@ -34,16 +40,16 @@ function ProtectedRoute() {
 
 function MainLayout() {
   const { user } = useAuth();
-  if (user?.role === 'platform_admin') return <PlatformPage />;
+  if (user?.role === 'platform_admin') return <Suspense fallback={<PageFallback />}><PlatformPage /></Suspense>;
 
   const pages: Record<string, ReactNode> = {
     '/': <DashboardPage />, '/agenda': <AgendaPage />, '/reservas': <ReservationsPage />, '/quadras': <CourtsPage />, '/clientes': <ClientsPage />, '/usuarios': <UsersPage />, '/financeiro': <FinancePage />, '/mensalistas': <MonthlyMembersPage />, '/torneios': <TournamentsPage />, '/configuracoes': <SettingsPage />, '/whatsapp': <WhatsAppPage />,
   };
-  return <AppLayout><Routes>{allNavItems.map((item) => <Route key={item.path} path={item.path} element={canSee(item, user?.role) && pages[item.path] ? pages[item.path] : <Navigate to="/" replace />} />)}<Route path="/platform" element={<Navigate to="/" replace />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></AppLayout>;
+  return <AppLayout><Suspense fallback={<PageFallback />}><Routes>{allNavItems.map((item) => <Route key={item.path} path={item.path} element={canSee(item, user?.role) && pages[item.path] ? pages[item.path] : <Navigate to="/" replace />} />)}<Route path="/platform" element={<Navigate to="/" replace />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></Suspense></AppLayout>;
 }
 
 function AppRoutes() {
-  return <Routes>
+  return <Suspense fallback={<PageFallback />}><Routes>
     <Route path="/login" element={<LoginPage />} />
     <Route path="/cadastro" element={<SignupPage />} />
     <Route path="/a/:slug" element={<PublicArenaPage />} />
@@ -53,7 +59,7 @@ function AppRoutes() {
       <Route path="/onboarding" element={<OnboardingPage />} />
       <Route path="/*" element={<MainLayout />} />
     </Route>
-  </Routes>;
+  </Routes></Suspense>;
 }
 
 export default function App() {
