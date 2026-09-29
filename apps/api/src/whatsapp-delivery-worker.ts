@@ -3,6 +3,7 @@ import {bookings,companies,integrationSettings,whatsappDeliveries,whatsappMessag
 import {db} from './database.js';
 import {arenaInformation,enqueueDelivery,integration,localPhoto,serviceSettings,wahaRequest} from './whatsapp-services.js';
 import {bookingInstant,type ServiceSettings} from './whatsapp-service-rules.js';
+import {isSimulatorPhone} from './whatsapp-simulation.js';
 
 let nextReviewScanAt=0;
 export async function scheduleReviews(now=Date.now()){
@@ -34,6 +35,7 @@ export async function deliverOne(id?:string){
   const company=(await db.select({status:companies.status}).from(companies).where(eq(companies.id,job.companyId)).limit(1))[0];if(company?.status!=='active'){await finish('skipped');return true;}
   if(Date.now()-Date.parse(job.createdAt)>86400000){await finish('skipped','Envio vencido.');return true;}
   const group=job.destination.endsWith('@g.us');
+  if(isSimulatorPhone(job.destination)){await finish('skipped','Simulador do agente.');return true;}
   if(group&&(!cfg.groupEnabled||cfg.groupId!==job.destination||!cfg.events.includes(job.kind))){await finish('skipped');return true;}
   const phone=job.destination.replace(/@c\.us$/,'');
   if(!group&&bot.testMode&&!((bot.testPhones||[]) as string[]).includes(phone)){await finish('skipped','Contato fora do modo de teste.');return true;}

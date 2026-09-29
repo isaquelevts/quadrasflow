@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState, type ComponentType, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  ArrowLeft, Banknote, BellRing, Bot, Check, ChevronRight, CircleDollarSign, Clock, Copy, CreditCard, FileText, Hand, Headset, Info, LoaderCircle, MessageCircle,
+  ArrowLeft, Banknote, BellRing, Bot, Check, ChevronRight, CircleDollarSign, Clock, Copy, CreditCard, FileText, FlaskConical, Hand, Headset, Info, LoaderCircle, MessageCircle,
   MessagesSquare, Pencil, Percent, Phone, Plus, QrCode, Send, Smartphone, Trash2, TriangleAlert, Workflow, X, type LucideProps,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { WhatsAppServices } from '@/components/WhatsAppServices';
+import { AgentSimulator } from '@/components/whatsapp/AgentSimulator';
 import { EmptyState, PageHeader, Panel } from '@/components/app/page';
 import { ResponsiveSheet } from '@/components/app/ResponsiveSheet';
 import { ToneBadge, type Tone } from '@/components/app/status';
@@ -29,7 +30,7 @@ type BotConfig = { paymentMode: PaymentMode; paymentPercent: number; paymentFixe
 type Conversation = { phone: string; step: string; updated_at: string; last_message: string };
 type Message = { direction: string; body: string; created_at: string };
 type Template = { id: string; title: string; category: string; body: string; active: boolean | number };
-type Tab = 'config' | 'services' | 'conversas' | 'modelos';
+type Tab = 'config' | 'services' | 'simulador' | 'conversas' | 'modelos';
 
 const defaultBot: BotConfig = { paymentMode: 'none', paymentPercent: 50, paymentFixedCents: 5000, timeZone: '', enabled: true, testMode: false, testPhones: [], welcome: 'Como posso te ajudar?\n1 – Agendar horário\n2 – Falar com atendente.', handoffMessage: 'Certo! Me conta rapidinho o que você precisa que já encaminho para o responsável. 👇', reactivateAfterHours: 4, humanStart: '06:00', humanEnd: '23:00', outsideHoursMessage: 'No momento estamos fora do horário de atendimento humano. Você pode agendar pelo nosso app. 😊', notifyPayment: true, remindUnpaid: true, menuOptions: [] };
 const ZONES = ['America/Noronha', 'America/Belem', 'America/Fortaleza', 'America/Recife', 'America/Maceio', 'America/Bahia', 'America/Santarem', 'America/Araguaina', 'America/Sao_Paulo', 'America/Campo_Grande', 'America/Cuiaba', 'America/Porto_Velho', 'America/Boa_Vista', 'America/Manaus', 'America/Eirunepe', 'America/Rio_Branco'];
@@ -51,7 +52,7 @@ export function WhatsAppPage() {
   const { user } = useAuth();
   const editable = user?.role === 'arena_admin';
   const tabs: Array<[Tab, string, ComponentType<LucideProps>]> = editable
-    ? [['config', 'Bot & configuração', Bot], ['services', 'Informações & automações', Workflow], ['conversas', 'Conversas', MessagesSquare], ['modelos', 'Modelos de mensagem', FileText]]
+    ? [['config', 'Bot & configuração', Bot], ['services', 'Informações & automações', Workflow], ['simulador', 'Testar agente', FlaskConical], ['conversas', 'Conversas', MessagesSquare], ['modelos', 'Modelos de mensagem', FileText]]
     : [['conversas', 'Conversas', MessagesSquare], ['modelos', 'Modelos de mensagem', FileText]];
   const [tab, setTab] = useState<Tab>(editable ? 'config' : 'conversas');
   const [config, setConfig] = useState<Config>({ session: '', enabled: false, status: 'unknown', connected: false, serviceConfigured: false, aiConfigured: false, webhookUrl: '' });
@@ -261,6 +262,7 @@ export function WhatsAppPage() {
         </aside>
       </div>}
 
+      {tab === 'simulador' && editable && <AgentSimulator />}
       {tab === 'conversas' && <Conversations conversations={conversations} phone={phone} messages={messages} onSelect={(value) => void selectConversation(value)} onChanged={() => void load()} />}
       {tab === 'modelos' && <Templates templates={templates} editable={editable} onEdit={setTemplateDraft} onRemove={setRemovingTemplate} onChanged={() => void load()} />}
     </>}

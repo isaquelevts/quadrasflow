@@ -1,4 +1,5 @@
 import {createHash, randomUUID} from 'node:crypto';
+import {isSimulating,isSimulatorPhone,simulationNote} from './whatsapp-simulation.js';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import sharp from 'sharp';
@@ -28,6 +29,7 @@ export async function arenaInformation(companyId:string){
  return {nome:c.name,endereco:[c.address,c.addressNumber,c.district,c.city,c.state].filter(Boolean).join(', '),address:c.address,addressNumber:c.addressNumber,district:c.district,city:c.city,state:c.state,mapsUrl:links.mapsUrl||'',instagramUrl:links.instagramUrl||'',reviewUrl:links.reviewUrl||''};
 }
 export async function enqueueDelivery(companyId:string,kind:string,destination:string,payload:Record<string,unknown>,id:string=randomUUID(),bookingId:string|null=null,dueAt=new Date().toISOString()) {
+ if(isSimulating()||isSimulatorPhone(destination)){simulationNote('note',`Envio automático "${kind}" (não enviado no simulador).`);return id;}
  const now=new Date().toISOString();await db.insert(whatsappDeliveries).values({id,companyId,kind,destination:chatDestination(destination),payload,bookingId,dueAt,createdAt:now,updatedAt:now}).onConflictDoNothing();return id;
 }
 export async function handoff(companyId:string,phone:string,reason:string,summary:string){
@@ -38,6 +40,7 @@ export async function handoff(companyId:string,phone:string,reason:string,summar
   if(prior?.step==='human')return;
   await tx.insert(whatsappConversations).values({companyId,phone,step:'human',context:{handoffReason:reason.slice(0,200),handoffSummary:summary.slice(0,700)},updatedAt:now}).onConflictDoUpdate({target:[whatsappConversations.companyId,whatsappConversations.phone],set:{step:'human',context:{handoffReason:reason.slice(0,200),handoffSummary:summary.slice(0,700)},updatedAt:now}});
   const settings=(await tx.select().from(integrationSettings).where(and(eq(integrationSettings.companyId,companyId),eq(integrationSettings.provider,'whatsapp_services'))).limit(1))[0]?.settings as ServiceSettings|undefined;
+  if(isSimulating()){simulationNote('note',`Aqui a equipe seria chamada (${reason.slice(0,200)}). O bot fica pausado nesta conversa.`);return;}
   if(settings?.groupEnabled&&settings.groupId&&settings.events.includes('handoff')){
    const base=(process.env.APP_BASE_URL||'').replace(/\/$/,'');
    await tx.insert(whatsappDeliveries).values({id:randomUUID(),companyId,kind:'handoff',destination:settings.groupId,payload:{text:`Atendimento humano solicitado\nContato: ${phone}\nMotivo: ${reason.slice(0,200)}\nResumo: ${summary.slice(0,700)}\n${base}/whatsapp?phone=${encodeURIComponent(phone)}`},dueAt:now,createdAt:now,updatedAt:now});
@@ -75,6 +78,7 @@ export async function cancelOwnBooking(companyId:string,phone:string,id:string){
 export async function queueCourtPhotos(companyId:string,phone:string,courtId:string,requestId:string){
  const court=(await db.select().from(courts).where(and(eq(courts.id,courtId),eq(courts.companyId,companyId),eq(courts.active,true))).limit(1))[0];if(!court)throw fail(404,'Quadra não encontrada.');
  if(!court.photos.length)return {enviadas:0,mensagem:'Essa quadra ainda não tem fotos cadastradas.'};
+ if(isSimulating()){for(const url of court.photos)simulationNote('note',`Foto enviada: ${url}`);return {enviadas:court.photos.length,mensagem:`${court.photos.length} foto(s) da ${court.name} enviada(s).`};}
  const ids=[];for(const [index,url] of court.photos.entries())ids.push(await enqueueDelivery(companyId,'photo',phone,{url,caption:court.name},`photo:${createHash('sha256').update(`${companyId}:${phone}:${requestId}:${court.id}:${index}`).digest('hex')}`));
  return {agendadas:ids.length,ids};
 }
