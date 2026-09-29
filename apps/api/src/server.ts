@@ -18,6 +18,7 @@ import { registerUserRoutes } from './users.js';
 import { registerInviteRoutes } from './invites.js';
 import { processExpiredWhatsAppPix, processWhatsAppPixReminders, registerMercadoPagoRoutes } from './mercadopago.js';
 import { registerMediaRoutes } from './media.js';
+import { crossSiteWriteBlocked, trustProxySetting } from './security.js';
 
 const app = Fastify({
   logger: {
@@ -29,7 +30,8 @@ const app = Fastify({
       },
     },
   },
-  trustProxy: process.env.TRUST_PROXY === 'true',
+  // Atrás de Cloudflare → Traefik → nginx, use TRUST_PROXY=cloudflare para o limite de requisições enxergar o IP real.
+  trustProxy: trustProxySetting(process.env.TRUST_PROXY),
   requestIdHeader: 'x-request-id',
   bodyLimit: 1_000_000,
 }).withTypeProvider<TypeBoxTypeProvider>();
@@ -43,7 +45,16 @@ await app.register(swagger, {
     servers: [{ url: '/api/v1' }],
   },
 });
-await app.register(swaggerUi, { routePrefix: '/docs' });
+// Documentação da API só fora de produção (ou com API_DOCS=true): não precisa ficar pública.
+if (process.env.NODE_ENV !== 'production' || process.env.API_DOCS === 'true') await app.register(swaggerUi, { routePrefix: '/docs' });
+
+// Escrita só a partir do próprio site (CSRF): complementa o cookie SameSite=Lax.
+const allowedOrigins = [process.env.APP_BASE_URL].filter((v): v is string => Boolean(v)).map((v) => new URL(v).origin.toLowerCase());
+app.addHook('onRequest', async (request, reply) => {
+  const fetchSite = request.headers['sec-fetch-site'];
+  if (crossSiteWriteBlocked({ method: request.method, url: request.url, origin: request.headers.origin, fetchSite: typeof fetchSite === 'string' ? fetchSite : undefined, host: request.headers.host, allowedOrigins }))
+    return reply.code(403).send({ error: { code: 'CROSS_SITE_BLOCKED', message: 'Requisição de outro site bloqueada.', requestId: request.id } });
+});
 
 app.get('/api/v1/health', {
   schema: {

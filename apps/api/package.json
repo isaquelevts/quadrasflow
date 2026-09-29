@@ -19,7 +19,7 @@
     "@quadrasflow/contracts": "^0.1.0",
     "@quadrasflow/database": "^0.1.0",
     "fastify": "^5.6.1",
-    "nodemailer": "^7.0.13",
+    "nodemailer": "^10.0.12",
     "openai": "7.23.0",
     "sharp": "^0.35.4",
     "zod": "4.6.5"
