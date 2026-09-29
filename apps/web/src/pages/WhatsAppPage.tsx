@@ -20,19 +20,20 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { useAuth } from '@/auth/AuthProvider';
+import { useShell } from '@/components/app/shell-context';
 import { ApiError, api } from '@/lib/api';
 import { errorMessage, formatCurrency, formatPhone } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 type Config = { session: string; enabled: boolean; status: string; connected: boolean; serviceConfigured: boolean; aiConfigured: boolean; webhookUrl: string };
 type PaymentMode = 'none' | 'full' | 'percent' | 'fixed';
-type BotConfig = { paymentMode: PaymentMode; paymentPercent: number; paymentFixedCents: number; timeZone: string; enabled: boolean; testMode: boolean; testPhones: string[]; welcome: string; handoffMessage: string; reactivateAfterHours: number; humanStart: string; humanEnd: string; outsideHoursMessage: string; notifyPayment: boolean; remindUnpaid: boolean; menuOptions: { id: string; label: string; response: string }[]; aiConfigured?: boolean; aiModel?: string };
-type Conversation = { phone: string; step: string; updated_at: string; last_message: string };
+type BotConfig = { paymentMode: PaymentMode; paymentPercent: number; paymentFixedCents: number; timeZone: string; enabled: boolean; testMode: boolean; testPhones: string[]; welcome: string; handoffMessage: string; reactivateAfterHours: number; manualResumeOnly: boolean; humanStart: string; humanEnd: string; outsideHoursMessage: string; notifyPayment: boolean; remindUnpaid: boolean; menuOptions: { id: string; label: string; response: string }[]; aiConfigured?: boolean; aiModel?: string };
+type Conversation = { phone: string; step: string; updated_at: string; last_message: string; awaiting_team?: boolean };
 type Message = { direction: string; body: string; created_at: string };
 type Template = { id: string; title: string; category: string; body: string; active: boolean | number };
 type Tab = 'config' | 'services' | 'simulador' | 'conversas' | 'modelos';
 
-const defaultBot: BotConfig = { paymentMode: 'none', paymentPercent: 50, paymentFixedCents: 5000, timeZone: '', enabled: true, testMode: false, testPhones: [], welcome: 'Como posso te ajudar?\n1 – Agendar horário\n2 – Falar com atendente.', handoffMessage: 'Certo! Me conta rapidinho o que você precisa que já encaminho para o responsável. 👇', reactivateAfterHours: 4, humanStart: '06:00', humanEnd: '23:00', outsideHoursMessage: 'No momento estamos fora do horário de atendimento humano. Você pode agendar pelo nosso app. 😊', notifyPayment: true, remindUnpaid: true, menuOptions: [] };
+const defaultBot: BotConfig = { paymentMode: 'none', paymentPercent: 50, paymentFixedCents: 5000, timeZone: '', enabled: true, testMode: false, testPhones: [], welcome: 'Como posso te ajudar?\n1 – Agendar horário\n2 – Falar com atendente.', handoffMessage: 'Certo! Me conta rapidinho o que você precisa que já encaminho para o responsável. 👇', reactivateAfterHours: 4, manualResumeOnly: true, humanStart: '06:00', humanEnd: '23:00', outsideHoursMessage: 'No momento a equipe está fora do horário de atendimento (das {inicio} às {fim}). Já deixei seu recado para ela. Enquanto isso, posso te ajudar com reservas por aqui. 😊', notifyPayment: true, remindUnpaid: true, menuOptions: [] };
 const ZONES = ['America/Noronha', 'America/Belem', 'America/Fortaleza', 'America/Recife', 'America/Maceio', 'America/Bahia', 'America/Santarem', 'America/Araguaina', 'America/Sao_Paulo', 'America/Campo_Grande', 'America/Cuiaba', 'America/Porto_Velho', 'America/Boa_Vista', 'America/Manaus', 'America/Eirunepe', 'America/Rio_Branco'];
 const FLOW: Array<[string, string]> = [['Menu', 'bg-brand-50 text-brand-700 border-brand-100'], ['Data', 'bg-sky-50 text-sky-700 border-sky-100'], ['Horário', 'bg-violet-50 text-violet-700 border-violet-100'], ['Duração', 'bg-amber-50 text-amber-700 border-amber-100'], ['Reserva', 'bg-rose-50 text-rose-700 border-rose-100'], ['Pix', 'bg-lime-300/20 text-lime-900 border-lime-300/60']];
 const PAY: Array<{ value: PaymentMode; title: string; desc: string; icon: ComponentType<LucideProps> }> = [
@@ -49,6 +50,7 @@ const TEMPLATE_CATS: Record<string, string> = { personalizado: 'Personalizado', 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 export function WhatsAppPage() {
+  const { refreshCounts } = useShell();
   const { user } = useAuth();
   const editable = user?.role === 'arena_admin';
   const tabs: Array<[Tab, string, ComponentType<LucideProps>]> = editable
@@ -215,19 +217,28 @@ export function WhatsAppPage() {
             </div>
           </Block>
 
-          <Block icon={Headset} title="Quando o cliente pede um atendente" sub="A automação pausa enquanto a equipe conversa.">
-            <p className="flex gap-2 rounded-lg bg-muted/70 px-3 py-2.5 text-[12.5px] text-muted-foreground"><Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" /><span>Em <b className="font-medium text-foreground">Informações & automações</b> você escolhe se a equipe libera a retomada manualmente. O prazo abaixo só vale com a retomada automática ligada.</span></p>
+          <Block icon={Headset} title="Quando o cliente pede um atendente" sub="Só pedidos claros (“quero falar com um atendente”) passam para a equipe; nesse horário, o bot pausa na conversa.">
             <div className="grid gap-1.5"><Label htmlFor="handoff-message">Mensagem de encaminhamento</Label><Textarea id="handoff-message" rows={3} maxLength={1000} value={bot.handoffMessage} onChange={(e) => setField('handoffMessage', e.target.value)} /></div>
-            <div className="flex flex-wrap items-center gap-2 text-[13px]"><Clock className="size-4 text-muted-foreground" aria-hidden="true" /><Label htmlFor="reactivate-hours">Retomar automação após</Label>
-              <Input id="reactivate-hours" className="h-9 w-20 text-center tabular-nums" type="number" min={1} max={48} value={bot.reactivateAfterHours} onChange={(e) => setField('reactivateAfterHours', Number(e.target.value))} /><span className="text-muted-foreground">horas sem mensagem</span></div>
+            <div className="grid gap-1.5">
+              <span id="resume-label" className="text-[13px] font-medium">Quando o bot volta a responder</span>
+              <div role="radiogroup" aria-labelledby="resume-label" className="grid gap-2 sm:grid-cols-2">
+                {([[true, 'Quando a equipe devolver', 'Fica pausado até alguém clicar em “Retomar bot” na conversa.'], [false, 'Sozinho, depois de um tempo', 'Volta quando a conversa fica parada pelo prazo abaixo.']] as const).map(([value, title, desc]) => { const on = bot.manualResumeOnly === value; return <button key={title} type="button" role="radio" aria-checked={on} onClick={() => setField('manualResumeOnly', value)}
+                  className={cn('relative flex flex-col gap-1 rounded-lg border p-3 pr-9 text-left transition', on ? 'border-brand-500 bg-brand-50/50 ring-2 ring-brand-500/15' : 'hover:bg-muted/60')}>
+                  <span aria-hidden="true" className={cn('absolute top-3 right-3 size-4 rounded-full border bg-white', on && 'border-[5px] border-brand-900')} />
+                  <span className="font-medium">{title}</span><span className="text-[12px] text-muted-foreground">{desc}</span>
+                </button>; })}
+              </div>
+              {!bot.manualResumeOnly && <div className="flex flex-wrap items-center gap-2 text-[13px]"><Clock className="size-4 text-muted-foreground" aria-hidden="true" /><Label htmlFor="reactivate-hours">Voltar após</Label>
+                <Input id="reactivate-hours" className="h-9 w-20 text-center tabular-nums" type="number" min={1} max={48} value={bot.reactivateAfterHours} onChange={(e) => setField('reactivateAfterHours', Number(e.target.value))} /><span className="text-muted-foreground">horas sem mensagens na conversa</span></div>}
+            </div>
           </Block>
 
-          <Block icon={Clock} title="Horário de atendimento humano" sub="Vale quando o cliente pede um atendente. O bot de agendamento continua 24h.">
+          <Block icon={Clock} title="Horário de atendimento humano" sub="Fora deste horário, o pedido de atendente vira um recado para a equipe e o bot continua atendendo reservas.">
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-1.5"><Label htmlFor="human-start">Início</Label><Input id="human-start" className="h-10 tabular-nums" type="time" value={bot.humanStart} onChange={(e) => setField('humanStart', e.target.value)} /></div>
               <div className="grid gap-1.5"><Label htmlFor="human-end">Fim</Label><Input id="human-end" className="h-10 tabular-nums" type="time" value={bot.humanEnd} onChange={(e) => setField('humanEnd', e.target.value)} /></div>
             </div>
-            <div className="grid gap-1.5"><Label htmlFor="outside-hours">Resposta fora do horário humano</Label><Textarea id="outside-hours" rows={2} maxLength={1000} value={bot.outsideHoursMessage} onChange={(e) => setField('outsideHoursMessage', e.target.value)} /></div>
+            <div className="grid gap-1.5"><Label htmlFor="outside-hours">Resposta fora do horário humano</Label><Textarea id="outside-hours" rows={3} maxLength={1000} aria-describedby="outside-hours-help" value={bot.outsideHoursMessage} onChange={(e) => setField('outsideHoursMessage', e.target.value)} /><span id="outside-hours-help" className="text-[12px] text-muted-foreground">Use {'{inicio}'} e {'{fim}'} para mostrar o horário da equipe.</span></div>
           </Block>
 
           <Block icon={CreditCard} title="Pagamento para reservar" sub="Quanto o cliente paga antecipadamente pelo Pix. Vale para o bot, a página pública e o link Pix da equipe.">
@@ -263,7 +274,7 @@ export function WhatsAppPage() {
       </div>}
 
       {tab === 'simulador' && editable && <AgentSimulator />}
-      {tab === 'conversas' && <Conversations conversations={conversations} phone={phone} messages={messages} onSelect={(value) => void selectConversation(value)} onChanged={() => void load()} />}
+      {tab === 'conversas' && <Conversations conversations={conversations} phone={phone} messages={messages} onSelect={(value) => void selectConversation(value)} onChanged={() => { void load(); refreshCounts(); }} />}
       {tab === 'modelos' && <Templates templates={templates} editable={editable} onEdit={setTemplateDraft} onRemove={setRemovingTemplate} onChanged={() => void load()} />}
     </>}
 
@@ -374,7 +385,7 @@ function Conversations({ conversations, phone, messages, onSelect, onChanged }: 
     finally { setSending(false); }
   }
   async function resume() {
-    try { await api(`/api/whatsapp/conversations/${phone}/resume`, { method: 'PATCH', body: '{}' }); toast.success('Automação retomada nesta conversa'); onChanged(); }
+    try { await api(`/api/whatsapp/conversations/${phone}/resume`, { method: 'PATCH', body: '{}' }); toast.success(current?.step === 'human' ? 'Automação retomada nesta conversa' : 'Pedido marcado como resolvido'); onChanged(); }
     catch (cause) { toast.error(errorMessage(cause)); }
   }
   return <div className="grid grid-cols-1 gap-4 xl:grid-cols-[.8fr_1.2fr]">
@@ -385,15 +396,15 @@ function Conversations({ conversations, phone, messages, onSelect, onChanged }: 
           <span className="grid size-9 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-700"><MessageCircle className="size-4" aria-hidden="true" /></span>
           <span className="min-w-0 flex-1"><span className="flex items-center justify-between gap-2"><span className="font-medium tabular-nums">{formatPhone(c.phone)}</span><span className="text-[11px] text-muted-foreground">{new Date(c.updated_at).toLocaleDateString('pt-BR')}</span></span>
             <span className="block truncate text-[12.5px] text-muted-foreground">{c.last_message || 'Sem mensagens'}</span>
-            {c.step === 'human' && <ToneBadge tone="amber" className="mt-1.5">Atendimento humano</ToneBadge>}</span>
+            {c.step === 'human' ? <ToneBadge tone="amber" className="mt-1.5">Atendimento humano</ToneBadge> : c.awaiting_team && <ToneBadge tone="blue" className="mt-1.5">Pediu atendente · bot ativo</ToneBadge>}</span>
         </button></li>)}</ul> : <EmptyState icon={MessagesSquare} title="Nenhuma conversa ainda" text="Quando clientes escreverem para o número da arena, as conversas aparecem aqui." />}
     </Panel>
     <Panel className={cn(!phone && 'hidden xl:block')}>
       {phone ? <>
         <div className="flex items-center gap-2 border-b px-4 py-3 lg:px-5">
           <Button variant="ghost" size="icon" className="xl:hidden" aria-label="Voltar para a lista" onClick={() => onSelect('')}><ArrowLeft /></Button>
-          <div className="min-w-0 flex-1"><h2 className="truncate text-[15px] font-semibold tabular-nums">{formatPhone(phone)}</h2>{current?.step === 'human' && <p className="text-[12px] text-amber-700">Atendimento humano: o bot está pausado.</p>}</div>
-          {current?.step === 'human' && <Button variant="outline" size="sm" onClick={() => void resume()}><Bot /> Retomar bot</Button>}
+          <div className="min-w-0 flex-1"><h2 className="truncate text-[15px] font-semibold tabular-nums">{formatPhone(phone)}</h2>{current?.step === 'human' ? <p className="text-[12px] text-amber-700">Atendimento humano: o bot está pausado.</p> : current?.awaiting_team && <p className="text-[12px] text-blue-700">Pediu atendente fora do horário. O bot segue atendendo; responder aqui assume a conversa.</p>}</div>
+          {current?.step === 'human' ? <Button variant="outline" size="sm" onClick={() => void resume()}><Bot /> Retomar bot</Button> : current?.awaiting_team && <Button variant="outline" size="sm" onClick={() => void resume()}><Check /> Marcar como resolvido</Button>}
         </div>
         <div className="max-h-[440px] space-y-2 overflow-auto bg-[#efeae2] p-4" aria-live="polite">
           {messages.length ? messages.map((m, i) => <div key={i} className={cn('w-fit max-w-[85%] rounded-lg px-3 py-2 text-[13px] shadow-sm', m.direction === 'out' ? 'ml-auto rounded-tr-none bg-[#d9fdd3]' : 'rounded-tl-none bg-white')}>
