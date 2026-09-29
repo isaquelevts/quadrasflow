@@ -2,7 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api';
 
-export type ShellCounts = { pending: number; courts: number; whatsapp: 'on' | 'off' | 'unknown' };
+export type AttentionItem = { phone: string; reason: string; at: string; paused: boolean };
+export type ShellCounts = { pending: number; courts: number; whatsapp: 'on' | 'off' | 'unknown'; attention: AttentionItem[] };
 
 type ShellContextValue = {
   counts: ShellCounts;
@@ -16,16 +17,14 @@ const ShellContext = createContext<ShellContextValue | null>(null);
 export function ShellProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
-  const [counts, setCounts] = useState<ShellCounts>({ pending: 0, courts: 0, whatsapp: 'unknown' });
+  const [counts, setCounts] = useState<ShellCounts>({ pending: 0, courts: 0, whatsapp: 'unknown', attention: [] });
   const primary = useRef<(() => void) | null>(null);
 
   // Contadores do menu vêm da API (nunca fixos no código).
   const refreshCounts = useCallback(() => {
-    void api<{ pending: { count: number }; today: { courts_active: number } }>('/api/dashboard')
-      .then((data) => setCounts((current) => ({ ...current, pending: data.pending.count, courts: data.today.courts_active })))
-      .catch(() => undefined);
-    void api<{ status?: string; session?: string }>('/api/integrations/waha')
-      .then((data) => setCounts((current) => ({ ...current, whatsapp: !data.session ? 'off' : data.status === 'WORKING' ? 'on' : 'off' })))
+    // Uma chamada só: contadores do menu, status do WhatsApp e clientes esperando a equipe (sininho).
+    void api<{ pending: number; courtsActive: number; whatsapp: 'on' | 'off'; attention: AttentionItem[] }>('/api/shell')
+      .then((data) => setCounts({ pending: data.pending, courts: data.courtsActive, whatsapp: data.whatsapp, attention: data.attention }))
       .catch(() => setCounts((current) => ({ ...current, whatsapp: 'unknown' })));
   }, []);
 

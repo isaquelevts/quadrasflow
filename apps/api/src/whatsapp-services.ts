@@ -32,18 +32,23 @@ export async function enqueueDelivery(companyId:string,kind:string,destination:s
  if(isSimulating()||isSimulatorPhone(destination)){simulationNote('note',`Envio automático "${kind}" (não enviado no simulador).`);return id;}
  const now=new Date().toISOString();await db.insert(whatsappDeliveries).values({id,companyId,kind,destination:chatDestination(destination),payload,bookingId,dueAt,createdAt:now,updatedAt:now}).onConflictDoNothing();return id;
 }
-export async function handoff(companyId:string,phone:string,reason:string,summary:string){
- const now=new Date().toISOString();
+/**
+ * Passa a conversa para a equipe. `pause:false` (pedido fora do horário humano) só deixa o recado:
+ * a equipe é avisada, mas o bot continua atendendo reservas.
+ */
+export async function handoff(companyId:string,phone:string,reason:string,summary:string,{pause=true}:{pause?:boolean}={}){
+ const now=new Date().toISOString(),awaitingTeam={at:now,reason:reason.slice(0,200),summary:summary.slice(0,700)};
  await db.transaction(async tx=>{
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${companyId}),hashtext(${phone}))`);
   const prior=(await tx.select().from(whatsappConversations).where(and(eq(whatsappConversations.companyId,companyId),eq(whatsappConversations.phone,phone))).limit(1))[0];
   if(prior?.step==='human')return;
-  await tx.insert(whatsappConversations).values({companyId,phone,step:'human',context:{handoffReason:reason.slice(0,200),handoffSummary:summary.slice(0,700)},updatedAt:now}).onConflictDoUpdate({target:[whatsappConversations.companyId,whatsappConversations.phone],set:{step:'human',context:{handoffReason:reason.slice(0,200),handoffSummary:summary.slice(0,700)},updatedAt:now}});
+  if(pause)await tx.insert(whatsappConversations).values({companyId,phone,step:'human',context:{handoffReason:reason.slice(0,200),handoffSummary:summary.slice(0,700),awaitingTeam},updatedAt:now}).onConflictDoUpdate({target:[whatsappConversations.companyId,whatsappConversations.phone],set:{step:'human',context:{handoffReason:reason.slice(0,200),handoffSummary:summary.slice(0,700),awaitingTeam},updatedAt:now}});
+  else await tx.insert(whatsappConversations).values({companyId,phone,step:'',context:{awaitingTeam},updatedAt:now}).onConflictDoUpdate({target:[whatsappConversations.companyId,whatsappConversations.phone],set:{context:sql`${whatsappConversations.context} || ${JSON.stringify({awaitingTeam})}::jsonb`,updatedAt:now}});
   const settings=(await tx.select().from(integrationSettings).where(and(eq(integrationSettings.companyId,companyId),eq(integrationSettings.provider,'whatsapp_services'))).limit(1))[0]?.settings as ServiceSettings|undefined;
-  if(isSimulating()){simulationNote('note',`Aqui a equipe seria chamada (${reason.slice(0,200)}). O bot fica pausado nesta conversa.`);return;}
+  if(isSimulating()){simulationNote('note',pause?`Aqui a equipe seria chamada (${reason.slice(0,200)}). O bot fica pausado nesta conversa.`:`Fora do horário humano: a equipe seria avisada (${reason.slice(0,200)}), e o bot continua atendendo.`);return;}
   if(settings?.groupEnabled&&settings.groupId&&settings.events.includes('handoff')){
    const base=(process.env.APP_BASE_URL||'').replace(/\/$/,'');
-   await tx.insert(whatsappDeliveries).values({id:randomUUID(),companyId,kind:'handoff',destination:settings.groupId,payload:{text:`Atendimento humano solicitado\nContato: ${phone}\nMotivo: ${reason.slice(0,200)}\nResumo: ${summary.slice(0,700)}\n${base}/whatsapp?phone=${encodeURIComponent(phone)}`},dueAt:now,createdAt:now,updatedAt:now});
+   await tx.insert(whatsappDeliveries).values({id:randomUUID(),companyId,kind:'handoff',destination:settings.groupId,payload:{text:`Atendimento humano solicitado${pause?'':' (fora do horário; o bot segue atendendo)'}\nContato: ${phone}\nMotivo: ${reason.slice(0,200)}\nResumo: ${summary.slice(0,700)}\n${base}/whatsapp?phone=${encodeURIComponent(phone)}`},dueAt:now,createdAt:now,updatedAt:now});
   }
  });
 }

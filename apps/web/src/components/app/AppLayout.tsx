@@ -1,6 +1,6 @@
 import { useEffect, useState, type ComponentType, type ReactNode } from 'react';
 import {
-  Bell, CalendarCheck, CalendarDays, ChevronRight, LandPlot, LayoutGrid, LogOut, Menu, MessageCircle, Plus, Repeat,
+  Bell, CalendarCheck, CalendarDays, ChevronRight, Headset, LandPlot, LayoutGrid, LogOut, Menu, MessageCircle, Plus, Repeat,
   Settings2, Trophy, UserCog, Users, Wallet, type LucideProps,
 } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
@@ -13,7 +13,8 @@ import { Toaster } from '@/components/ui/sonner';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AccountSheet } from '@/components/app/AccountSheet';
 import { ShellProvider, useShell, type ShellCounts } from '@/components/app/shell-context';
-import { initials } from '@/lib/format';
+import { formatPhone, initials } from '@/lib/format';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 
 type NavItem = { label: string; path: string; icon: ComponentType<LucideProps>; extra?: (counts: ShellCounts) => ReactNode; adminOnly?: boolean };
@@ -143,7 +144,6 @@ function AppSidebar() {
 
 function AppHeader() {
   const { user } = useAuth();
-  const { counts } = useShell();
   const { setOpenMobile } = useSidebar();
   const title = usePageTitle();
 
@@ -164,14 +164,46 @@ function AppHeader() {
         <span className="font-medium" aria-current="page">{title}</span>
       </nav>
       <div className="ml-auto flex items-center gap-2">
-        <Link to="/reservas" aria-label={counts.pending ? `${counts.pending} reservas pendentes` : 'Nenhuma reserva pendente'} title="Reservas pendentes"
-          className="relative grid size-10 place-items-center rounded-md border bg-white shadow-xs hover:bg-muted lg:size-9">
-          <Bell className="size-4" aria-hidden="true" />
-          {counts.pending > 0 && <span aria-hidden="true" className="absolute top-2 right-2 size-2 rounded-full bg-amber-500 ring-2 ring-white" />}
-        </Link>
+        <NotificationsBell />
       </div>
     </div>
   </header>;
+}
+
+/** Sininho: reservas pendentes e clientes esperando a equipe no WhatsApp. */
+function NotificationsBell() {
+  const { counts } = useShell();
+  const [open, setOpen] = useState(false);
+  const waiting = counts.attention.length, total = counts.pending + waiting;
+  const label = total ? [counts.pending ? `${counts.pending} reserva(s) pendente(s)` : '', waiting ? `${waiting} cliente(s) esperando a equipe` : ''].filter(Boolean).join(', ') : 'Nenhum aviso';
+  const since = (iso: string) => { const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000)); return minutes < 1 ? 'agora' : minutes < 60 ? `há ${minutes} min` : minutes < 1440 ? `há ${Math.round(minutes / 60)} h` : new Date(iso).toLocaleDateString('pt-BR'); };
+  return <Popover open={open} onOpenChange={setOpen}>
+    <PopoverTrigger aria-label={`Avisos: ${label}`} title="Avisos" className="relative grid size-10 place-items-center rounded-md border bg-white shadow-xs hover:bg-muted lg:size-9">
+      <Bell className="size-4" aria-hidden="true" />
+      {waiting > 0 ? <span aria-hidden="true" className="absolute -top-1.5 -right-1.5 grid size-[18px] place-items-center rounded-full bg-rose-500 text-[10px] font-semibold text-white ring-2 ring-white">{waiting > 9 ? '9+' : waiting}</span>
+        : counts.pending > 0 && <span aria-hidden="true" className="absolute top-2 right-2 size-2 rounded-full bg-amber-500 ring-2 ring-white" />}
+    </PopoverTrigger>
+    <PopoverContent align="end" className="w-[min(22rem,calc(100vw-2rem))] p-0">
+      <div className="border-b px-4 py-3 text-[14px] font-semibold">Avisos</div>
+      <div className="max-h-[60vh] overflow-auto">
+        {waiting > 0 && <section aria-label="Esperando a equipe" className="border-b py-1">
+          <p className="px-4 pt-2 pb-1 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">Esperando a equipe no WhatsApp</p>
+          {counts.attention.slice(0, 8).map((item) => <Link key={item.phone} to={`/whatsapp?phone=${encodeURIComponent(item.phone)}`} onClick={() => setOpen(false)} className="flex items-start gap-3 px-4 py-2.5 hover:bg-muted/60">
+            <span className="grid size-8 shrink-0 place-items-center rounded-full bg-rose-50 text-rose-600"><Headset className="size-4" aria-hidden="true" /></span>
+            <span className="min-w-0 flex-1 text-[13px]"><span className="flex justify-between gap-2"><span className="font-medium tabular-nums">{formatPhone(item.phone)}</span><span className="shrink-0 text-[11px] text-muted-foreground">{since(item.at)}</span></span>
+              <span className={cn('mt-0.5 inline-block rounded px-1.5 text-[11px] font-medium', item.paused ? 'bg-amber-50 text-amber-800' : 'bg-blue-50 text-blue-800')}>{item.paused ? 'Bot pausado' : 'Fora do horário · bot segue atendendo'}</span>
+              <span className="block truncate text-[12px] text-muted-foreground">{item.reason}</span></span>
+          </Link>)}
+          {waiting > 8 && <Link to="/whatsapp" onClick={() => setOpen(false)} className="block px-4 py-2 text-[12.5px] font-medium text-brand-700 hover:underline">Ver todas as {waiting} conversas</Link>}
+        </section>}
+        <Link to="/reservas" onClick={() => setOpen(false)} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/60">
+          <span className="grid size-8 shrink-0 place-items-center rounded-full bg-amber-50 text-amber-600"><CalendarCheck className="size-4" aria-hidden="true" /></span>
+          <span className="flex-1 text-[13px]">{counts.pending ? <><b className="font-semibold">{counts.pending}</b> reserva(s) aguardando confirmação</> : 'Nenhuma reserva pendente'}</span>
+          <ChevronRight className="size-4 text-muted-foreground" aria-hidden="true" />
+        </Link>
+      </div>
+    </PopoverContent>
+  </Popover>;
 }
 
 function BottomNav() {
