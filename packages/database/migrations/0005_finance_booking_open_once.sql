@@ -1,0 +1,2 @@
+DROP INDEX "finance_booking_once_idx";--> statement-breakpoint
+CREATE UNIQUE INDEX "finance_booking_open_once_idx" ON "finance_entries" USING btree ("booking_id") WHERE "finance_entries"."booking_id" IS NOT NULL AND "finance_entries"."paid_at" IS NULL;

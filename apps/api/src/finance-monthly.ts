@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gte, lte, ne, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { appAudit, blockedSlots, bookings, clients, companyHours, courts, financeEntries, monthlyCharges, monthlyMembers } from '@quadrasflow/database';
+import { bookingEnded, changeBookingStatus, syncBookingReceivable } from './booking-finance.js';
 import { db } from './database.js';
 import { adminOf, audit, companyOf, fail, text, userOf } from './arena.js';
 const routes = (app: FastifyInstance) => ({ preHandler: app.authenticate });
@@ -16,11 +17,14 @@ export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
     adminOf(request); // Financeiro é só do administrador; a Recepção não vê.
     const companyId = companyOf(request), q = request.query as { from?: string; to?: string }, today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date()), from = q.from || `${today.slice(0, 7)}-01`, to = q.to || today;
     if (!datePattern.test(from) || !datePattern.test(to) || from > to) throw fail(400, 'Confira o período do relatório.');
-    const entries = await db.select().from(financeEntries).where(and(eq(financeEntries.companyId, companyId), gte(financeEntries.dueDate, from), lte(financeEntries.dueDate, to))).orderBy(sql`${financeEntries.dueDate} DESC`, sql`${financeEntries.createdAt} DESC`);
+    const rows = await db.select({ entry: financeEntries, customerName: bookings.customerName, bookingStatus: bookings.status, startAt: bookings.startAt, endAt: bookings.endAt, courtName: courts.name })
+      .from(financeEntries).leftJoin(bookings, eq(bookings.id, financeEntries.bookingId)).leftJoin(courts, eq(courts.id, bookings.courtId))
+      .where(and(eq(financeEntries.companyId, companyId), gte(financeEntries.dueDate, from), lte(financeEntries.dueDate, to))).orderBy(sql`${financeEntries.dueDate} DESC`, sql`${financeEntries.createdAt} DESC`);
+    const entries = rows.map((r) => r.entry), extra = new Map(rows.map((r) => [r.entry.id, r]));
     const summary = { income_paid: 0, expense_paid: 0, expense_due: 0, income_due: 0, result: 0 };
     for (const e of entries) { const key = `${e.kind}_${e.paidAt ? 'paid' : 'due'}` as keyof typeof summary; if (key in summary) summary[key] += e.amountCents; }
     summary.result = summary.income_paid - summary.expense_paid;
-    const mapped = entries.map((e) => ({ id: e.id, kind: e.kind, category: e.category, description: e.description, amount_cents: e.amountCents, due_date: e.dueDate, paid_at: e.paidAt, booking_id: e.bookingId, monthly_charge_id: e.monthlyChargeId, tournament_entry_id: e.tournamentEntryId, created_at: e.createdAt }));
+    const mapped = entries.map((e) => ({ id: e.id, kind: e.kind, category: e.category, description: e.description, amount_cents: e.amountCents, due_date: e.dueDate, paid_at: e.paidAt, booking_id: e.bookingId, monthly_charge_id: e.monthlyChargeId, tournament_entry_id: e.tournamentEntryId, created_at: e.createdAt, ...(e.bookingId ? (({ customerName, bookingStatus, startAt, endAt, courtName }) => ({ booking: { customer_name: customerName, status: bookingStatus, start_at: startAt, end_at: endAt, court_name: courtName, ended: endAt ? bookingEnded(endAt) : false } }))(extra.get(e.id)!) : {}) }));
     const categories = new Map<string, { kind: string; category: string; amount_cents: number; count: number }>();
     for (const e of entries.filter((x) => x.paidAt)) { const key = `${e.kind}\0${e.category}`, current = categories.get(key) || { kind: e.kind, category: e.category, amount_cents: 0, count: 0 }; current.amount_cents += e.amountCents; current.count++; categories.set(key, current); }
     return { entries: mapped, summary, categories: [...categories.values()] };
@@ -46,10 +50,25 @@ export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
   });
   app.patch('/api/finance/:id/paid', auth, async (request) => {
     const user = adminOf(request), companyId = companyOf(request), { id } = request.params as { id: string }, b = bodyOf(request), paidAt = b.paid ? new Date().toISOString() : null;
-    const updated = await db.update(financeEntries).set({ paidAt }).where(and(eq(financeEntries.id, id), eq(financeEntries.companyId, companyId))).returning({ id: financeEntries.id });
-    if (!updated.length) throw fail(404, 'Lançamento não encontrado.');
+    const result = await db.transaction(async (tx) => {
+      const current = (await tx.select().from(financeEntries).where(and(eq(financeEntries.id, id), eq(financeEntries.companyId, companyId))).limit(1))[0];
+      if (!current) return null;
+      // Só um "a receber" em aberto por reserva: ao desfazer um pagamento, o saldo aberto é recalculado junto com ele.
+      if (!paidAt && current.bookingId) await tx.delete(financeEntries).where(and(eq(financeEntries.bookingId, current.bookingId), sql`${financeEntries.paidAt} IS NULL`, sql`${financeEntries.id} <> ${id}`));
+      const entry = (await tx.update(financeEntries).set({ paidAt }).where(eq(financeEntries.id, id)).returning())[0];
+      if (!entry) return null;
+      let completed = false;
+      if (entry.bookingId) {
+        // Recebido depois do horário do jogo: a reserva também é concluída (um clique só).
+        const booking = (await tx.select().from(bookings).where(eq(bookings.id, entry.bookingId)).limit(1))[0];
+        if (paidAt && booking?.status === 'confirmed' && bookingEnded(booking.endAt)) completed = Boolean(await changeBookingStatus(tx, { companyId, userId: user.id, bookingId: booking.id, status: 'completed', source: 'finance' }));
+        else await syncBookingReceivable(tx, companyId, entry.bookingId);
+      }
+      return { completed };
+    });
+    if (!result) throw fail(404, 'Lançamento não encontrado.');
     await audit(companyId, user.id, b.paid ? 'finance.paid' : 'finance.reopened', 'finance_entry', id);
-    return { ok: true };
+    return { ok: true, bookingCompleted: result.completed };
   });
 
   app.get('/api/monthly-members', auth, async (request) => {

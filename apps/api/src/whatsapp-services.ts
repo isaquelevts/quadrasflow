@@ -1,4 +1,5 @@
 import {createHash, randomUUID} from 'node:crypto';
+import {syncBookingReceivable} from './booking-finance.js';
 import {isSimulating,isSimulatorPhone,simulationNote} from './whatsapp-simulation.js';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -74,6 +75,7 @@ export async function cancelOwnBooking(companyId:string,phone:string,id:string){
   if(!cancellationAllowed(row.status,row.startAt,bot.timeZone,company.cancellationHours))throw fail(409,'O prazo ou a situação da reserva mudou. A equipe precisa analisar o cancelamento.');
   const now=new Date().toISOString();
   await tx.update(bookings).set({status:'cancelled',cancelReason:'Solicitado pelo cliente no WhatsApp',updatedAt:now}).where(eq(bookings.id,id));
+  await syncBookingReceivable(tx,companyId,id);
   await tx.insert(bookingEvents).values({id:randomUUID(),companyId,bookingId:id,event:'cancelled',details:{source:'whatsapp',phone},createdAt:now});
   await tx.insert(appAudit).values({id:randomUUID(),companyId,action:'whatsapp.booking.cancelled',entity:'booking',entityId:id,details:{phone},createdAt:now});
   await tx.update(whatsappDeliveries).set({status:'skipped',updatedAt:now}).where(and(eq(whatsappDeliveries.bookingId,id),eq(whatsappDeliveries.kind,'review'),eq(whatsappDeliveries.status,'pending')));

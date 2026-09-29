@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ComponentType, type FormEvent } from 'react';
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarCheck, Check, CircleDot, CupSoda, Download, Droplet, Hourglass, LoaderCircle, Package, Plus, Receipt, Repeat, Scale, Trash2, Trophy, Undo2, Users, Wrench, Zap, type LucideProps } from 'lucide-react';
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarCheck, Check, CircleDot, CupSoda, Download, Droplet, Hourglass, LoaderCircle, Package, Plus, Receipt, Repeat, Scale, Trash2, Trophy, Undo2, Users, Wrench, X, Zap, type LucideProps } from 'lucide-react';
 import { endOfMonth, format, startOfMonth, subDays, subMonths } from 'date-fns';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from 'recharts';
 import { toast } from 'sonner';
@@ -23,7 +23,8 @@ import { errorMessage, formatCurrency, plural } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 type Kind = 'income' | 'expense';
-type Entry = { id: string; kind: Kind; category: string; description: string; amount_cents: number; due_date: string; paid_at: string | null; booking_id: string | null; monthly_charge_id: string | null; tournament_entry_id: string | null; created_at: string };
+type Entry = { id: string; kind: Kind; category: string; description: string; amount_cents: number; due_date: string; paid_at: string | null; booking_id: string | null; monthly_charge_id: string | null; tournament_entry_id: string | null; created_at: string; booking?: BookingInfo };
+type BookingInfo = { customer_name: string | null; status: string | null; start_at: string | null; end_at: string | null; court_name: string | null; ended: boolean };
 type Summary = { income_paid: number; expense_paid: number; income_due: number; expense_due: number; result: number };
 type Preset = 'month' | 'last' | '7' | '30' | '';
 
@@ -42,9 +43,18 @@ const PRESETS: Array<{ value: Exclude<Preset, ''>; label: string; range: () => [
 ];
 const statusOf = (e: Entry): { label: string; tone: Tone } => e.paid_at ? { label: 'Pago', tone: 'green' } : e.due_date < todayKey() ? { label: 'Atrasado', tone: 'rose' } : { label: 'Em aberto', tone: 'amber' };
 const automatic = (e: Entry) => Boolean(e.booking_id || e.monthly_charge_id || e.tournament_entry_id);
-/** Título legível: "Reserva 494f2f92-…" vira "Pagamento de reserva" com a referência curta embaixo. */
+/** Tipo do lançamento de reserva, a partir da descrição gravada pelo sistema. */
+const BOOKING_KIND: Record<string, string> = { 'Sinal de reserva': 'Sinal pago via Pix', 'Pagamento de reserva': 'Pago via Pix', 'Reserva (pagar na arena)': 'A receber na arena', 'Saldo da reserva (pagar na arena)': 'Saldo a receber na arena' };
+/** Reserva aberta para agir no Financeiro (receber ou cancelar)? */
+const bookingOpen = (e: Entry) => Boolean(e.booking_id && !e.paid_at && e.booking?.status && ['pending', 'confirmed'].includes(e.booking.status));
+/** Título legível: reservas aparecem pelo nome de quem reservou, com tipo, quadra e horário embaixo. */
 function titleOf(e: Entry) {
-  if (e.booking_id) return { title: /^reserva [0-9a-f-]{20,}$/i.test(e.description) ? 'Pagamento de reserva' : e.description, ref: `#${e.booking_id.slice(0, 8)}`, full: e.booking_id };
+  if (e.booking_id) {
+    const b = e.booking, when = b?.start_at ? `${b.start_at.slice(8, 10)}/${b.start_at.slice(5, 7)} ${b.start_at.slice(11, 16)}` : '';
+    const kind = BOOKING_KIND[e.description] || (/^reserva [0-9a-f-]{20,}$/i.test(e.description) ? 'Reserva' : e.description);
+    const ref = [kind, b?.court_name, when, b?.status === 'cancelled' ? 'reserva cancelada' : ''].filter(Boolean).join(' · ');
+    return { title: b?.customer_name || 'Reserva', ref, full: e.booking_id };
+  }
   if (e.monthly_charge_id) return { title: e.description.replace(/^Mensalidade (\d{4})-(\d{2})$/, (_, y, m) => `Mensalidade de ${fmtDate(`${y}-${m}-01`, 'MMMM')}/${y}`), ref: 'Mensalista', full: '' };
   if (e.tournament_entry_id) return { title: e.description, ref: 'Inscrição em torneio', full: '' };
   return { title: e.description, ref: 'Lançamento manual', full: '' };
@@ -61,6 +71,7 @@ export function FinancePage() {
   const [tab, setTab] = useState<'all' | 'income' | 'expense' | 'open'>('all');
   const [creating, setCreating] = useState(false);
   const [removing, setRemoving] = useState<Entry | null>(null);
+  const [cancelling, setCancelling] = useState<Entry | null>(null);
   const [busy, setBusy] = useState(false);
 
   usePrimaryAction(() => setCreating(true));
@@ -76,7 +87,10 @@ export function FinancePage() {
   function setDates(nextFrom: string, nextTo: string) { setPreset(''); setRange(nextFrom > nextTo ? [nextTo, nextFrom] : [nextFrom, nextTo]); }
   async function togglePaid(e: Entry) {
     setBusy(true);
-    try { await api(`/api/finance/${e.id}/paid`, { method: 'PATCH', body: JSON.stringify({ paid: !e.paid_at }) }); toast.success(e.paid_at ? 'Voltou para em aberto' : e.kind === 'income' ? 'Marcado como recebido' : 'Marcado como pago'); await load(); }
+    try {
+      const r = await api<{ bookingCompleted?: boolean }>(`/api/finance/${e.id}/paid`, { method: 'PATCH', body: JSON.stringify({ paid: !e.paid_at }) });
+      toast.success(e.paid_at ? 'Voltou para em aberto' : r.bookingCompleted ? 'Recebido e reserva concluída' : e.kind === 'income' ? 'Marcado como recebido' : 'Marcado como pago'); await load();
+    }
     catch (cause) { toast.error(errorMessage(cause)); }
     finally { setBusy(false); }
   }
@@ -152,9 +166,10 @@ export function FinancePage() {
               <td className="px-3 py-3"><ToneBadge tone="gray" dot={false}>{e.category}</ToneBadge></td>
               <td className="px-3 py-3 tabular-nums">{e.due_date.split('-').reverse().join('/')}</td>
               <td className="px-3 py-3"><ToneBadge tone={st.tone}>{st.label}</ToneBadge></td>
-              <td className="px-3 py-3 text-right font-semibold tabular-nums"><Signed entry={e} /></td>
+              <td className="px-3 py-3 text-right font-semibold whitespace-nowrap tabular-nums"><Signed entry={e} /></td>
               <td className="px-5 py-3"><div className="flex justify-end gap-1.5">
-                {e.paid_at ? <Button variant="outline" disabled={busy} className="text-muted-foreground" onClick={() => void togglePaid(e)}><Undo2 />Desfazer</Button> : <Button disabled={busy} onClick={() => void togglePaid(e)}><Check />{e.kind === 'income' ? 'Recebido' : 'Pago'}</Button>}
+                {e.paid_at ? <Button variant="outline" disabled={busy} className="text-muted-foreground" onClick={() => void togglePaid(e)}><Undo2 />Desfazer</Button> : <Button disabled={busy} onClick={() => void togglePaid(e)}><Check />{e.kind === 'expense' ? 'Pago' : e.booking?.ended && e.booking.status === 'confirmed' ? 'Recebido e concluir' : 'Recebido'}</Button>}
+                {bookingOpen(e) && <Button variant="outline" size="icon" disabled={busy} className="text-muted-foreground hover:text-rose-600" aria-label={`Cancelar reserva de ${t.title}`} title="Cancelar reserva" onClick={() => setCancelling(e)}><X /></Button>}
                 {!automatic(e) && <Button variant="outline" size="icon" disabled={busy} className="text-muted-foreground hover:text-rose-600" aria-label={`Excluir ${t.title}`} title="Excluir" onClick={() => setRemoving(e)}><Trash2 /></Button>}
               </div></td>
             </tr>; })}</tbody>
@@ -164,9 +179,10 @@ export function FinancePage() {
             <div className="min-w-0 flex-1">
               <div className="flex items-start justify-between gap-2"><span className="font-medium">{t.title}</span><span className="shrink-0 font-semibold tabular-nums"><Signed entry={e} /></span></div>
               <div className="truncate text-[12px] text-muted-foreground">{e.category} · {t.ref}</div>
-              <div className="mt-2 flex items-center gap-2"><ToneBadge tone={st.tone}>{st.label}</ToneBadge><span className="text-[12px] text-muted-foreground tabular-nums">vence {e.due_date.slice(8)}/{e.due_date.slice(5, 7)}</span>
-                <span className="ml-auto flex gap-1.5">
-                  {e.paid_at ? <Button variant="outline" size="icon" disabled={busy} aria-label={`Desfazer pagamento de ${t.title}`} onClick={() => void togglePaid(e)}><Undo2 /></Button> : <Button size="sm" disabled={busy} onClick={() => void togglePaid(e)}><Check />{e.kind === 'income' ? 'Recebido' : 'Pago'}</Button>}
+              <div className="mt-2 flex flex-wrap items-center gap-2"><ToneBadge tone={st.tone}>{st.label}</ToneBadge><span className="text-[12px] text-muted-foreground tabular-nums">vence {e.due_date.slice(8)}/{e.due_date.slice(5, 7)}</span>
+                <span className="ml-auto flex min-w-0 gap-1.5">
+                  {e.paid_at ? <Button variant="outline" size="icon" disabled={busy} aria-label={`Desfazer pagamento de ${t.title}`} onClick={() => void togglePaid(e)}><Undo2 /></Button> : <Button size="sm" disabled={busy} onClick={() => void togglePaid(e)}><Check />{e.kind === 'expense' ? 'Pago' : e.booking?.ended && e.booking.status === 'confirmed' ? 'Recebido e concluir' : 'Recebido'}</Button>}
+                  {bookingOpen(e) && <Button variant="outline" size="icon" className="size-8" disabled={busy} aria-label={`Cancelar reserva de ${t.title}`} title="Cancelar reserva" onClick={() => setCancelling(e)}><X /></Button>}
                   {!automatic(e) && <Button variant="outline" size="icon" disabled={busy} aria-label={`Excluir ${t.title}`} onClick={() => setRemoving(e)}><Trash2 /></Button>}
                 </span></div>
             </div>
@@ -187,6 +203,21 @@ export function FinancePage() {
             event.preventDefault(); const target = removing; setRemoving(null); if (!target) return;
             try { await api(`/api/finance/${target.id}`, { method: 'DELETE' }); toast.success('Lançamento excluído'); await load(); } catch (cause) { toast.error(errorMessage(cause)); }
           }}>Excluir</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    <AlertDialog open={Boolean(cancelling)} onOpenChange={(value) => { if (!value) setCancelling(null); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader className="flex flex-row items-start gap-3 text-left">
+          <span className="grid size-10 shrink-0 place-items-center rounded-full bg-rose-50 text-rose-600"><X className="size-5" aria-hidden="true" /></span>
+          <div className="space-y-1"><AlertDialogTitle>Cancelar a reserva?</AlertDialogTitle><AlertDialogDescription>{cancelling ? `${titleOf(cancelling).title} · ${titleOf(cancelling).ref}` : ''}. O valor em aberto sai do Financeiro e o horário fica livre na agenda. Pagamentos já recebidos continuam registrados.</AlertDialogDescription></div>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="grid grid-cols-2 gap-2 sm:flex">
+          <AlertDialogCancel>Voltar</AlertDialogCancel>
+          <AlertDialogAction className="bg-rose-600 text-white hover:bg-rose-700" onClick={async (event) => {
+            event.preventDefault(); const target = cancelling; setCancelling(null); if (!target?.booking_id) return;
+            try { await api(`/api/bookings/${target.booking_id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'cancelled', reason: 'Cancelada pelo Financeiro' }) }); toast.success('Reserva cancelada'); await load(); } catch (cause) { toast.error(errorMessage(cause)); }
+          }}>Cancelar reserva</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

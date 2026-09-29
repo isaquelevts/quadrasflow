@@ -36,6 +36,13 @@
       "when": 1790647198773,
       "tag": "0004_fase3a_acessos",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790720670686,
+      "tag": "0005_finance_booking_open_once",
+      "breakpoints": true
     }
   ]
 }

@@ -7,6 +7,7 @@ import { isUniqueViolation } from './db-errors.js';
 import type { AuthUser } from './auth.js';
 import { bookingAmountCents } from './pricing.js';
 import { findMonthlyConflict, monthlyConflictMessage } from './monthly-conflict.js';
+import { changeBookingStatus, syncBookingReceivable, type BookingStatus } from './booking-finance.js';
 
 type AuthedRequest = FastifyRequest & { user: AuthUser | null };
 const fail = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
@@ -273,6 +274,7 @@ export async function registerArenaRoutes(app: FastifyInstance) {
       const tariffs = await tx.select({ weekday: companyPriceSlots.weekday, startTime: companyPriceSlots.startTime, endTime: companyPriceSlots.endTime, priceCents: companyPriceSlots.priceCents }).from(companyPriceSlots).where(eq(companyPriceSlots.companyId, companyId));
       const amountCents = bookingAmountCents(startAt, endAt, court.priceCents, tariffs);
       await tx.update(bookings).set({ clientId, courtId, customerName, customerPhone: phone || null, startAt, endAt, amountCents, updatedAt: now }).where(and(eq(bookings.id, id), eq(bookings.companyId, companyId)));
+      await syncBookingReceivable(tx, companyId, id); // novo valor/data refletem no "a receber"
       await tx.insert(bookingEvents).values({ id: randomUUID(), companyId, bookingId: id, userId: user.id, event: 'edited', details: { before: { courtId: current.courtId, startAt: current.startAt, endAt: current.endAt }, after: { courtId, startAt, endAt } }, createdAt: now });
       return { id };
     });
@@ -295,19 +297,10 @@ export async function registerArenaRoutes(app: FastifyInstance) {
   app.patch('/api/bookings/:id/status', auth, async (request) => {
     const user = userOf(request), companyId = companyOf(request), { id } = request.params as { id: string }, body = bodyOf(request), status = String(body.status || '');
     if (!['confirmed', 'cancelled', 'completed'].includes(status)) throw fail(400, 'Status de reserva inválido.');
-    const rows = await db.update(bookings).set({ status, cancelReason: status === 'cancelled' ? String(body.reason || '').slice(0, 200) : '', updatedAt: new Date().toISOString() }).where(and(eq(bookings.id, id), eq(bookings.companyId, companyId), sql`${bookings.status} IN ('pending','confirmed')`)).returning({ id: bookings.id });
-    if (!rows.length) throw fail(404, 'Reserva não encontrada ou já encerrada.');
-    await db.insert(bookingEvents).values({ id: randomUUID(), companyId, bookingId: id, userId: user.id, event: status, details: { reason: String(body.reason || '') }, createdAt: new Date().toISOString() });
-    await audit(companyId, user.id, `booking.${status}`, 'booking', id);
-    let reviewToken: string | null = null;
-    if (status === 'completed') {
-      reviewToken = randomBytes(32).toString('base64url');
-      const now = new Date();
-      await db.insert(reviewLinks).values({ id: randomUUID(), companyId, bookingId: id, tokenHash: createHash('sha256').update(reviewToken).digest('hex'), expiresAt: new Date(now.getTime() + 90 * 86400000).toISOString(), submittedAt: null, createdAt: now.toISOString() }).onConflictDoNothing();
-      // Review delivery is scheduled after the booking ends by the durable worker.
-
-    }
-    return { ok: true, status, reviewToken };
+    // Situação e Financeiro mudam juntos: confirmar cria o "a receber", cancelar tira o que estava em aberto.
+    const result = await db.transaction((tx) => changeBookingStatus(tx, { companyId, userId: user.id, bookingId: id, status: status as BookingStatus, reason: String(body.reason || '') }));
+    if (!result) throw fail(404, 'Reserva não encontrada ou já encerrada.');
+    return { ok: true, status, reviewToken: result.reviewToken };
   });
 }
 
