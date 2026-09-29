@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { companies, sessions, users } from '@quadrasflow/database';
 import { db } from './database.js';
 import { isUniqueViolation } from './db-errors.js';
+import { AccountLockout } from './security.js';
 
 export type AuthUser = { id: string; name: string; email: string; role: string; setupNeeded: boolean; company: { id: string; name: string; slug: string } | null };
 declare module 'fastify' {
@@ -27,6 +28,9 @@ function passwordCheck(password: string, salt: string, expected: string) {
   const known = Buffer.from(expected, 'hex');
   return candidate.length === known.length && timingSafeEqual(candidate, known);
 }
+// Hash descartável: quando o e-mail não existe, a checagem gasta o mesmo tempo (não revela quais e-mails têm conta).
+const DUMMY_SALT = randomBytes(16).toString('hex'), DUMMY_HASH = scryptSync(randomBytes(16).toString('hex'), DUMMY_SALT, 64).toString('hex');
+const loginLockout = new AccountLockout(8, 15 * 60_000);
 function parseToken(request: FastifyRequest) {
   const cookie = request.headers.cookie || '';
   const item = cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith('qf_session='));
@@ -58,9 +62,14 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     const rows = await db.select({ user: users, companyStatus: companies.status, companyName: companies.name, slug: companies.slug, onboardingCompleted: companies.onboardingCompleted })
       .from(users).leftJoin(companies, eq(users.companyId, companies.id)).where(eq(users.email, email)).limit(1);
     const row = rows[0];
-    if (!row || !row.user.active || (row.user.companyId && row.companyStatus !== 'active') || !passwordCheck(password, row.user.passwordSalt, row.user.passwordHash)) {
+    const wait = loginLockout.retryAfter(email);
+    if (wait) return reply.code(429).header('retry-after', String(wait)).send({ error: { code: 'AUTH_LOCKED', message: `Muitas tentativas para este e-mail. Tente de novo em ${Math.ceil(wait / 60)} minuto(s).` } });
+    const passwordOk = passwordCheck(password, row?.user.passwordSalt ?? DUMMY_SALT, row?.user.passwordHash ?? DUMMY_HASH);
+    if (!row || !passwordOk || !row.user.active || (row.user.companyId && row.companyStatus !== 'active')) {
+      loginLockout.fail(email);
       return reply.code(401).send({ error: { code: 'AUTH_INVALID', message: 'E-mail ou senha não conferem.' } });
     }
+    loginLockout.succeed(email);
     await createSession(row.user.id, reply);
     await db.update(users).set({ lastLoginAt: new Date().toISOString() }).where(eq(users.id, row.user.id));
     return { user: { id: row.user.id, name: row.user.name, email: row.user.email, role: row.user.role, setupNeeded: Boolean(row.user.companyId && !row.onboardingCompleted), company: row.user.companyId ? { id: row.user.companyId, name: row.companyName!, slug: row.slug! } : null } };
