@@ -3,6 +3,7 @@ import { and, asc, desc, eq, gte, lt, ne, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { appAudit, blockedSlots, bookingEvents, bookings, clients, companies, companyHours, companyPriceSlots, courts, integrationSettings, messageTemplates, monthlyMembers, reviewLinks } from '@quadrasflow/database';
 import { db } from './database.js';
+import { isUniqueViolation } from './db-errors.js';
 import type { AuthUser } from './auth.js';
 import { bookingAmountCents } from './pricing.js';
 import { findMonthlyConflict, monthlyConflictMessage } from './monthly-conflict.js';
@@ -113,7 +114,7 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const photoFolder = createHash('sha256').update(companyId).digest('hex').slice(0, 32);
     if (photoUrl && !new RegExp(`^/api/arena/media/${photoFolder}/[a-f0-9-]{36}\\.webp$`).test(photoUrl)) throw fail(400, 'Envie uma foto da quadra pela galeria de imagens.');
     const row = { id: randomUUID(), companyId, name, sport, priceCents, photoUrl: photoUrl || null, photos: photoUrl ? [photoUrl] : [], surface: '', covering: '', players: 0, sports: [sport], active: true, createdAt: new Date().toISOString() };
-    try { await db.insert(courts).values(row); } catch (cause) { if ((cause as { code?: string }).code === '23505') throw fail(409, 'Já existe uma quadra com esse nome.'); throw cause; }
+    try { await db.insert(courts).values(row); } catch (cause) { if (isUniqueViolation(cause)) throw fail(409, 'Já existe uma quadra com esse nome.'); throw cause; }
     await audit(companyId, user.id, 'court.created', 'court', row.id);
     return reply.code(201).send({ court: toCourt(row) });
   });
@@ -132,7 +133,7 @@ export async function registerArenaRoutes(app: FastifyInstance) {
       await audit(companyId, user.id, 'court.updated', 'court', id);
       return { court: toCourt(rows[0]) };
     } catch (cause) {
-      if (cause && typeof cause === 'object' && 'code' in cause && cause.code === '23505') throw fail(409, 'Já existe uma quadra com esse nome.');
+      if (isUniqueViolation(cause)) throw fail(409, 'Já existe uma quadra com esse nome.');
       throw cause;
     }
   });
@@ -144,7 +145,7 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const user = userOf(request), companyId = companyOf(request), body = bodyOf(request), name = text(body.name, 'o nome do cliente'), phone = digits(body.phone);
     if (phone && (phone.length < 10 || phone.length > 15)) throw fail(400, 'Informe um telefone com DDD.');
     const row = { id: randomUUID(), companyId, name, phone: phone || null, createdAt: new Date().toISOString() };
-    try { await db.insert(clients).values(row); } catch (cause) { if ((cause as { code?: string }).code === '23505') throw fail(409, 'Esse cliente já está cadastrado.'); throw cause; }
+    try { await db.insert(clients).values(row); } catch (cause) { if (isUniqueViolation(cause)) throw fail(409, 'Esse cliente já está cadastrado.'); throw cause; }
     await audit(companyId, user.id, 'client.created', 'client', row.id);
     return reply.code(201).send({ client: { ...toClient(row), bookings_count: 0, last_booking_at: null } });
   });
