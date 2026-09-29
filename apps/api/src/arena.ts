@@ -140,7 +140,7 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     }
   });
   app.get('/api/clients', auth, async (request) => {
-    const companyId = companyOf(request), [clientRows, bookingRows] = await Promise.all([db.select().from(clients).where(eq(clients.companyId, companyId)).orderBy(asc(clients.name)), db.select({ clientId: bookings.clientId, startAt: bookings.startAt }).from(bookings).where(and(eq(bookings.companyId, companyId), ne(bookings.status, 'cancelled')))]);
+    const companyId = companyOf(request), [clientRows, bookingRows] = await Promise.all([db.select().from(clients).where(and(eq(clients.companyId, companyId), sql`${clients.phone} NOT LIKE '000%'`)).orderBy(asc(clients.name)), db.select({ clientId: bookings.clientId, startAt: bookings.startAt }).from(bookings).where(and(eq(bookings.companyId, companyId), ne(bookings.status, 'cancelled')))]);
     return { clients: clientRows.map((c) => { const mine = bookingRows.filter((b) => b.clientId === c.id); return { ...toClient(c), bookings_count: mine.length, last_booking_at: mine.map((b) => b.startAt).sort().at(-1) || null }; }) };
   });
   app.post('/api/clients', auth, async (request, reply) => {
