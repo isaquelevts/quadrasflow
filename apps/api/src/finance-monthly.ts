@@ -34,6 +34,16 @@ export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
     await audit(companyId, user.id, 'finance.created', 'finance_entry', id, { kind, amountCents });
     return reply.code(201).send({ id });
   });
+  app.delete('/api/finance/:id', auth, async (request) => {
+    const user = adminOf(request), companyId = companyOf(request), { id } = request.params as { id: string };
+    const entry = (await db.select().from(financeEntries).where(and(eq(financeEntries.id, id), eq(financeEntries.companyId, companyId))).limit(1))[0];
+    if (!entry) throw fail(404, 'Lançamento não encontrado.');
+    // Lançamentos automáticos (reserva, mensalidade, torneio) são a prova do pagamento; só os manuais podem ser excluídos.
+    if (entry.bookingId || entry.monthlyChargeId || entry.tournamentEntryId) throw fail(409, 'Lançamentos automáticos de reservas, mensalidades e torneios não podem ser excluídos. Use "Desfazer" para reabrir.');
+    await db.delete(financeEntries).where(and(eq(financeEntries.id, id), eq(financeEntries.companyId, companyId)));
+    await audit(companyId, user.id, 'finance.deleted', 'finance_entry', id, { kind: entry.kind, amountCents: entry.amountCents, description: entry.description });
+    return { ok: true };
+  });
   app.patch('/api/finance/:id/paid', auth, async (request) => {
     const user = adminOf(request), companyId = companyOf(request), { id } = request.params as { id: string }, b = bodyOf(request), paidAt = b.paid ? new Date().toISOString() : null;
     const updated = await db.update(financeEntries).set({ paidAt }).where(and(eq(financeEntries.id, id), eq(financeEntries.companyId, companyId))).returning({ id: financeEntries.id });

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
-import { and, eq, gt } from 'drizzle-orm';
+import { and, eq, gt, ne } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { companies, sessions, users } from '@quadrasflow/database';
 import { db } from './database.js';
@@ -83,6 +83,21 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     }
     await createSession(userId, reply);
     return reply.code(201).send({ user: { id: userId, name, email, role: 'arena_admin', setupNeeded: true, company: { id: companyId, name: arenaName, slug } } });
+  });
+  // Troca de senha da própria conta: confere a senha atual e encerra as sessões em outros aparelhos.
+  app.post('/api/auth/password', { config: { rateLimit: { max: 10, timeWindow: 15 * 60 * 1000 } } }, async (request, reply) => {
+    const current = await readUser(request);
+    if (!current) return reply.code(401).send({ error: { code: 'AUTH_REQUIRED', message: 'Entre na sua conta para continuar.' } });
+    const body = bodyOf(request), currentPassword = String(body.currentPassword ?? ''), newPassword = String(body.newPassword ?? '');
+    if (newPassword.length < 8 || newPassword.length > 200) throw Object.assign(new Error('A nova senha precisa ter pelo menos 8 caracteres.'), { statusCode: 400 });
+    const row = (await db.select().from(users).where(eq(users.id, current.id)).limit(1))[0];
+    if (!row || !passwordCheck(currentPassword, row.passwordSalt, row.passwordHash)) throw Object.assign(new Error('A senha atual não confere.'), { statusCode: 400 });
+    if (passwordCheck(newPassword, row.passwordSalt, row.passwordHash)) throw Object.assign(new Error('A nova senha precisa ser diferente da atual.'), { statusCode: 400 });
+    const salt = randomBytes(16).toString('hex');
+    await db.update(users).set({ passwordHash: scryptSync(newPassword, salt, 64).toString('hex'), passwordSalt: salt }).where(eq(users.id, row.id));
+    const token = parseToken(request);
+    await db.delete(sessions).where(and(eq(sessions.userId, row.id), ne(sessions.tokenHash, hash(token))));
+    return { ok: true };
   });
   app.post('/api/auth/logout', async (request, reply) => {
     const token = parseToken(request);
