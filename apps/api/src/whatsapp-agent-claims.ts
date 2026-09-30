@@ -1,9 +1,9 @@
 // Guardrail de saída do agente (sem banco, para poder testar isolado).
 /** Saída: a IA não pode afirmar que reservou, cancelou ou enviou Pix sem a ferramenta ter feito isso nesta rodada. */
 const CLAIMS: { kind: 'reserva' | 'cancelamento' | 'pix'; pattern: RegExp }[] = [
-  { kind: 'reserva', pattern: /\b(?:reserva|pedido|hor[aá]rio)\b[^.!?\n]{0,40}\b(?:est[aá]|foi|ficou)\s+(?:confirmad[ao]|registrad[ao]|feit[ao]|reservad[ao]|garantid[ao])\b|\b(?:reservei|confirmei|registrei)\b/i },
+  { kind: 'reserva', pattern: /\b(?:reserva|pedido|hor[aá]rio)\b[^.!?\n]{0,40}\b(?:est[aá]|foi|ficou)\s+(?:confirmad[ao]|registrad[ao]|feit[ao]|reservad[ao]|garantid[ao])\b|\b(?:reservei|confirmei|registrei)\b|\b(?:reserva|pedido)\s+(?:confirmad[ao]|registrad[ao]|feit[ao]|garantid[ao])\b/i },
   { kind: 'cancelamento', pattern: /\b(?:foi|est[aá]|ficou)\s+cancelad[ao]\b|\bcancelei\b/i },
-  { kind: 'pix', pattern: /\b(?:enviei|mandei)\b[^.!?\n]{0,30}\bpix\b|\bpix\b[^.!?\n]{0,30}\b(?:foi|foram)\s+enviad[oa]s?\b/i },
+  { kind: 'pix', pattern: /\b(?:enviei|mandei)\b[^.!?\n]{0,30}\bpix\b|\bpix\b[^.!?\n]{0,30}\b(?:foi|foram)\s+enviad[oa]s?\b|\breceber[aá]\s+o\s+pix\b/i },
 ];
 export type AgentFacts = { bookingCreated: boolean; bookingsListed: boolean; pixSent: boolean };
 export function unsupportedClaim(text: string, facts: AgentFacts) {

@@ -17,6 +17,7 @@ import { arenaInformation, handoff, ownBookings, prepareCancellation, queueCourt
 import { deliverOne } from './whatsapp-delivery-worker.js';
 import { simulationNote } from './whatsapp-simulation.js';
 import { unsupportedClaim } from './whatsapp-agent-claims.js';
+import { freeCourtsMessage, parseTimeDuration, searchFreeCourts, type Duration } from './whatsapp-court-search.js';
 import { dateSaidByClient } from './whatsapp-date-guard.js';
 import { isOutsideHumanHours, outsideHoursText, type HumanHours } from './whatsapp-handoff-rules.js';
 
@@ -87,19 +88,110 @@ class WhatsAppHistorySession implements Session {
 function instructions(t: Turn, companyName: string, savedCustomerName: string) {
   const c = t.context, now = localNow(t.bot.timeZone || 'America/Belem', t.receivedAt);
   const tomorrow = new Date(`${now.date}T12:00:00Z`); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-  const scope = 'Use consultar_informacoes_arena para localização, Instagram e avaliação. Use enviar_fotos_quadra somente a pedido. Para cancelar, use listar_minhas_reservas e preparar_cancelamento; nunca diga que cancelou antes do sistema confirmar. Transfira com chamar_atendente quando pedirem uma pessoa ou quando o assunto estiver fora de informações, regras, fotos, reservas, cancelamentos e pagamentos da arena. Não responda assuntos gerais fora desse escopo.';
-  const identity = `Você é o assistente de reservas da *${companyName || 'arena'}*. Atenda pelo WhatsApp em português brasileiro, com cordialidade, clareza e mensagens curtas. Use poucos emojis com sentido consistente: 📅 data, 🕒 horário, ⏱️ duração, 💰 valor, 💚 pagamento confirmado, 👤 equipe. Separe blocos de mensagem com linhas em branco.`;
-  const clock = `Hoje é ${displayDate(now.date)}. Amanhã será ${displayDate(tomorrow.toISOString().slice(0, 10))}. Agora são ${now.time} no horário local da arena (${t.bot.timeZone}). Reavalie a data local a cada mensagem. Use somente dados desta arena retornados pelas ferramentas. Nunca invente quadras, valores, horários, disponibilidade ou status de pagamento.`;
-  const booking = `Atenda primeiro à intenção expressa pela pessoa. Se ela já perguntar por horários, não reinicie pelo menu: identifique a data e o intervalo mencionados e use interpretar_data para datas naturais. Pergunte somente o dado que estiver faltando: não pergunte a quadra antes de saber data, horário e duração. Nunca presuma a data: use interpretar_data só com palavras de data que o cliente escreveu. Se ele apenas escolheu reservar (por exemplo, respondeu “1”), pergunte para qual dia e horário. Quando o intervalo exato vier sem uma quadra escolhida, aguarde o sistema verificar as quadras livres antes de pedir preferência; não apresente o catálogo geral como se fosse disponibilidade. Nunca narre consultas, chamadas de ferramenta, verificações ou o que você fará em seguida; faça o trabalho em silêncio e responda apenas com o resultado ou a pergunta necessária. Se a pessoa pedir uma reserva informando início e fim, primeiro pergunte somente “Você quer reservar das HH:MM às HH:MM, certo?” e aguarde a confirmação. Não consulte horários, não peça nome e não acrescente explicações antes dessa confirmação. Depois do “sim”, confira disponibilidade e valor com as ferramentas. Se estiver livre, peça o nome somente quando não houver nome salvo; quando houver, use o nome salvo. Se informar apenas o início, pergunte se deseja 1h, 1h30 ou 2h antes de pedir o nome. Se o intervalo não corresponder a 1h, 1h30 ou 2h, peça esclarecimento. Salve o nome com salvar_contato assim que a pessoa informar, mesmo antes de concluir a reserva. Nome já salvo para este telefone nesta arena: ${savedCustomerName || 'nenhum'}. Não pergunte novamente quando já existir. Intervalo confirmado e disponibilidade verificada pelo sistema: ${JSON.stringify(c.confirmedInterval || null)}. No primeiro contato, se a pessoa apenas cumprimentar sem dizer o que precisa, ofereça 1️⃣ Reservar uma quadra e 2️⃣ Falar com a equipe. Use interpretar_data para expressões naturais ou numéricas. Quando a data for válida e a quadra estiver escolhida, consulte os horários imediatamente. Diga a data completa junto dos horários. Se a ferramenta pedir esclarecimento, pergunte apenas isso. Não peça confirmação intermediária da data; a confirmação explícita acontece no resumo final da reserva. Mostre todos os horários livres retornados pela ferramenta, um por linha no formato 🕒 HH:MM. Se o cliente pedir um período, liste somente os horários daquele período. Nunca diga que não há vagas em um período sem consultar a ferramenta.`;
-  const order = 'Antes de criar o pedido, use as ferramentas para consultar o horário completo, o preço e a disponibilidade. Mostre um resumo com quadra, data, início, fim, duração e valor. Peça confirmação explícita. Se houver cobrança antecipada, o pedido fica pendente até o Mercado Pago confirmar o pagamento. Sem cobrança antecipada, informe que a equipe confirmará o pedido. Nunca prometa Pix quando não houver cobrança ativa. Nunca trate a resposta do cliente como comprovante. Se o horário acabar, consulte novas opções.';
-  const payment = `Depois de confirmar o pedido, se a ferramenta informar codigo_e_qr_enviados, avise que o QR Code e o Pix Copia e Cola foram enviados em mensagens separadas; se informar codigo_enviado_sem_imagem, avise que o código foi enviado; se informar falha_no_envio_do_pix, explique que a equipe verificará. Não repita nem invente um código Pix. Não peça senha, código de autenticação, dados de cartão ou chave Pix. Se pedirem atendente, encaminhe. Se a mensagem estiver confusa, repita apenas a pergunta atual com um exemplo curto. Contexto: ${JSON.stringify({ pendingBooking: c.pendingBooking || null, selectedCourtId: c.selectedCourtId || null, selectedCourtName: c.selectedCourtName || null, confirmedDate: c.confirmedDate || null, cancellationFlow: c.cancellationFlow || false, cancellationOptions: c.cancellationOptions || null, photoRequested: c.photoRequested || false, recadoParaEquipe: Boolean(c.awaitingTeam) })}.${c.awaitingTeam ? ` A equipe já recebeu um recado deste cliente e responde no horário de atendimento (das ${t.bot.humanStart} às ${t.bot.humanEnd}); não chame chamar_atendente de novo pelo mesmo assunto e continue ajudando com reservas e informações.` : ''}`;
-  return [scope, identity, clock, booking, order, payment].join('\n');
+  const search = c.search as { date?: string; start?: string | null; duration?: number | null } | undefined;
+  const pending = c.pendingBooking as PendingBooking | undefined;
+  const state = [
+    `Data escolhida: ${c.confirmedDate ? `${displayDate(String(c.confirmedDate))} (use ${c.confirmedDate} nas ferramentas)` : 'nenhuma'}.`,
+    search ? `Última busca de quadras: ${search.start ? `início ${search.start}` : 'sem horário'}, ${search.duration ? `${search.duration} minutos` : 'sem duração'} (lista numerada já enviada ao cliente).` : 'Nenhuma lista de quadras enviada ainda.',
+    `Quadra escolhida pelo cliente: ${c.selectedCourtName || 'nenhuma'}.`,
+    `Nome salvo do cliente: ${savedCustomerName || 'nenhum'}.`,
+    pending ? `Resumo enviado aguardando "sim": ${pending.courtName}, ${pending.date} ${pending.startTime}, ${pending.durationMinutes} min.` : '',
+    c.awaitingEmail ? 'O sistema já explicou o pagamento antecipado e pediu o e-mail.' : '',
+    c.cancellationFlow ? 'O cliente está tratando de cancelamento.' : '',
+    c.awaitingTeam ? `A equipe já recebeu um recado deste cliente e responde das ${t.bot.humanStart} às ${t.bot.humanEnd}; não chame chamar_atendente de novo pelo mesmo assunto.` : '',
+  ].filter(Boolean).join('\n');
+  const payment = t.paymentRequired
+    ? 'Esta arena cobra pagamento antecipado por Pix. Se ainda não tiver o e-mail, chame preparar_reserva com email_cliente null: o sistema explica o valor e pede o e-mail. Quando o cliente mandar o e-mail, chame preparar_reserva de novo com os mesmos dados e o e-mail.'
+    : 'Esta arena não cobra pagamento antecipado: nunca peça e-mail; o pagamento é feito na arena.';
+  return `# Papel
+Você é o atendente de reservas da *${companyName || 'arena'}* no WhatsApp. Escreva em português do Brasil, com cordialidade e mensagens curtas. Use poucos emojis: 📅 data, 🕒 horário, ⏱️ duração, 💰 valor, 👤 equipe.
+
+# Relógio
+Hoje é ${displayDate(now.date)}. Amanhã será ${displayDate(tomorrow.toISOString().slice(0, 10))}. Agora são ${now.time} (${t.bot.timeZone}).
+
+# Fluxo da reserva (siga nesta ordem; uma pergunta por vez; aproveite tudo o que o cliente já disse)
+1. Se o cliente só cumprimentar, ofereça: 1️⃣ Reservar uma quadra e 2️⃣ Falar com a equipe. Se ele escolher reservar sem dizer a data, pergunte: "Ótimo! Para qual dia você quer reservar a quadra? 📅".
+2. Data: chame interpretar_data com a expressão que o cliente escreveu. Nunca presuma a data.
+3. Depois de interpretar_data, o sistema já envia a pergunta de horário e duração ou, se o cliente já disse horário ou duração, a lista numerada de quadras livres. Não acrescente nada.
+4. Se o cliente mudar o horário ou a duração, chame consultar_quadras_livres com o que ele disse (null no que não disse). O sistema envia a lista numerada.
+5. Quando o cliente escolher a quadra (número ou nome da lista): se já souber horário e duração, vá ao passo 6; senão chame consultar_horarios dessa quadra (pergunte antes a duração se ainda não souber). O sistema envia os horários.
+6. Nome: use o nome salvo; se não houver, pergunte e salve com salvar_contato.
+7. Chame preparar_reserva. ${payment} O sistema envia o resumo com "Confirma a reserva?". Essa é a única confirmação.
+8. Se o cliente confirmar o resumo, chame confirmar_reserva. ${t.paymentRequired ? 'O sistema envia o Pix e avisa o prazo de 15 minutos; não peça outra confirmação e não repita o código.' : 'Informe que o pedido foi registrado.'}
+
+# Outros pedidos
+- Endereço, localização, Instagram ou avaliação: consultar_informacoes_arena. Fotos só a pedido: enviar_fotos_quadra.
+- Cancelar: listar_minhas_reservas e preparar_cancelamento; nunca diga que cancelou antes do sistema confirmar.
+- Pessoa da equipe, assunto fora de reservas/informações da arena ou decisão da equipe: chamar_atendente.
+
+# Regras
+- Use somente dados devolvidos pelas ferramentas. Nunca invente quadras, horários, valores, disponibilidade ou status de pagamento.
+- Nunca escolha a quadra, a data, o horário ou a duração pelo cliente.
+- Quando o sistema enviar uma lista ou resumo, não repita nem reescreva.
+- Durações possíveis: 1h, 1h30 ou 2h.
+- Se uma ferramenta devolver erro ou esclarecimento, siga a instrução dela e pergunte só isso.
+- Não narre ferramentas, consultas ou próximos passos; responda apenas com o resultado ou a pergunta necessária.
+- Não peça senha, cartão ou chave Pix. Não trate mensagem do cliente como comprovante de pagamento.
+
+# Estado atual da conversa (do sistema)
+${state}`;
+}
+
+/**
+ * Cria a reserva do resumo aguardando "sim" e, se a arena cobra antes, envia o Pix na hora.
+ * Usada direto pelo sistema quando o "sim" é claro e pela ferramenta confirmar_reserva.
+ */
+export async function confirmPendingBooking(deps: AgentDeps, input: { companyId: string; session: string; phone: string; context: Record<string, unknown> }) {
+  const pending = input.context.pendingBooking as PendingBooking | undefined;
+  if (!pending) return { error: 'Não há reserva aguardando confirmação.', reply: '', pixSent: false, paymentStatus: '' };
+  const bot = await deps.botConfig(input.companyId), paymentRequired = bot.paymentMode !== 'none' && await deps.mercadoPagoConnected(input.companyId);
+  try {
+    const item = await deps.createConfirmedBooking(input.companyId, input.phone, pending);
+    let paymentStatus = bot.paymentMode === 'none' ? 'sem_cobranca' : 'sem_mercado_pago';
+    if (paymentRequired && item.amountCents > 0) {
+      try { paymentStatus = await deps.sendBookingPix(input.companyId, input.session, input.phone, item.id, pending.customerEmail || ''); }
+      catch (error) { console.error('whatsapp_pix_send_failed', error instanceof Error ? error.message : 'unknown'); paymentStatus = 'falha_no_envio_do_pix'; }
+    }
+    await db.insert(appAudit).values({ id: randomUUID(), companyId: input.companyId, userId: null, action: 'whatsapp.booking.created', entity: 'booking', entityId: item.id, details: { paymentStatus }, createdAt: new Date().toISOString() });
+    delete input.context.pendingBooking;
+    const pixSent = ['codigo_e_qr_enviados', 'codigo_enviado_sem_imagem', 'ja_enviado'].includes(paymentStatus);
+    const reply = pixSent ? '' : paymentStatus === 'falha_no_envio_do_pix' ? 'Seu pedido foi registrado e está aguardando pagamento, mas não consegui enviar o Pix. A equipe vai verificar.' : 'Seu pedido foi registrado e está pendente de confirmação pela equipe. 👤';
+    return { error: '', reply, pixSent, paymentStatus };
+  } catch (error) {
+    delete input.context.pendingBooking;
+    return { error: error instanceof Error ? error.message : 'O horário não está mais disponível. Consulte novamente.', reply: '', pixSent: false, paymentStatus: '' };
+  }
+}
+
+/** Pergunta padrão depois da data (passo 3). */
+export const askTimeAndDuration = (day: string) => `📅 ${displayDate(day)}. Para listar somente as quadras livres, qual horário e duração você prefere: 1h, 1h30 ou 2h?`;
+
+/** Busca as quadras livres, guarda a lista no contexto e devolve a mensagem numerada (passo 4). */
+export async function listFreeCourts(deps: AgentDeps, companyId: string, context: Record<string, unknown>, day: string, start: string | null, duration: Duration | null) {
+  const active = await db.select({ id: courts.id, name: courts.name, sport: courts.sport }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))).orderBy(asc(courts.name));
+  const list = await searchFreeCourts(active, day, start, duration, (courtId, date, minutes) => deps.availability(companyId, courtId, date, minutes));
+  clearSearch(context);
+  context.confirmedDate = day; context.search = { date: day, start, duration }; context.courtOptions = list.map((c) => c.id);
+  return { message: freeCourtsMessage(displayDate(day), start, duration, list), list };
+}
+
+/** Esquece a busca anterior (data, quadra escolhida, lista) para não arrastar escolhas antigas. */
+function clearSearch(context: Record<string, unknown>) {
+  for (const key of ['search', 'courtOptions', 'selectedCourtId', 'selectedCourtName', 'pendingBooking', 'awaitingEmail', 'awaitingTimeChoice', 'awaitingCourtChoice', 'intervalStage', 'intervalReservation', 'pendingDate', 'confirmedInterval']) delete context[key];
+}
+/** Quadra pelo número da última lista enviada ou pelo nome. */
+async function pickCourt(deps: AgentDeps, turn: Turn, value: string) {
+  const options = Array.isArray(turn.context.courtOptions) ? (turn.context.courtOptions as unknown[]).map(String) : [];
+  const number = value.trim().match(/^(?:quadra\s*|op[cç][aã]o\s*)?(\d{1,2})$/i);
+  if (number && options.length) { const id = options[Number(number[1]) - 1]; return id ? deps.resolveCourt(turn.companyId, id) : undefined; }
+  return deps.resolveCourt(turn.companyId, value);
 }
 
 /** Ferramentas do agente. As de reserva só existem quando fazem sentido nesta rodada (ex.: confirmar só depois do "sim"). */
 function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
   const court = courtNames.length ? z.enum(courtNames as [string, ...string[]]) : z.string();
   const duration = z.union([z.literal(60), z.literal(90), z.literal(120)]);
+  const courtChoice = z.string().describe(`Número da opção na última lista enviada ou o nome da quadra${courtNames.length ? ` (${courtNames.join(', ')})` : ''}`);
   // Cada ferramenta: registra no simulador/log e devolve {erro} em vez de quebrar a rodada, como antes.
   const define = <S extends z.ZodObject>(name: string, description: string, parameters: S, body: (args: z.infer<S>, turn: Turn) => Promise<unknown>) => tool({
     name, description, parameters: parameters as z.ZodObject<z.ZodRawShape>, strict: true,
@@ -172,63 +264,79 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
         turn.context.handoff = true;
         return reply(turn, turn.bot.handoffMessage);
       }),
-    define('interpretar_data', 'Converte a data informada pelo cliente usando o relógio e o fuso da arena. Quando a data for válida, consulte a disponibilidade sem pedir confirmação intermediária. A confirmação explícita ocorre no resumo final da reserva.', z.object({ expressao: z.string() }),
+    define('interpretar_data', 'Converte a data que o cliente escreveu (ex.: "hoje", "sábado", "dia 5") usando o relógio e o fuso da arena. Use só com palavras de data ditas pelo cliente.', z.object({ expressao: z.string() }),
       async (args, turn) => {
         // A IA não pode presumir a data (ex.: inventar "amanhã" quando o cliente só escolheu reservar).
         const said = await db.select({ body: whatsappMessages.body }).from(whatsappMessages).where(and(eq(whatsappMessages.companyId, turn.companyId), eq(whatsappMessages.phone, turn.phone), eq(whatsappMessages.direction, 'in'))).orderBy(desc(whatsappMessages.createdAt)).limit(6);
         if (!dateSaidByClient(String(args.expressao || ''), [turn.message, ...said.map((m) => m.body)]))
-          return { ok: false, erro: 'O cliente ainda não disse a data. Pergunte para qual dia e horário ele quer reservar; não presuma hoje nem amanhã.' };
+          return { ok: false, erro: 'O cliente ainda não disse a data. Pergunte para qual dia ele quer reservar; não presuma hoje nem amanhã.' };
         const parsed = parseArenaDate(String(args.expressao || ''), turn.bot.timeZone, turn.receivedAt);
         if (!parsed.date) return { ok: false, esclarecimento: parsed.question };
-        turn.context.confirmedDate = parsed.date; delete turn.context.pendingDate;
-        return { ok: true, data: parsed.date, apresentacao: displayDate(parsed.date), instrucao: 'Data resolvida. Consulte horários da quadra escolhida agora; a confirmação será pedida no resumo final.' };
+        if (parsed.date !== turn.context.confirmedDate) clearSearch(turn.context);
+        turn.context.confirmedDate = parsed.date;
+        // Passos 3 e 4 feitos pelo sistema: com horário/duração na mesma mensagem, já lista as quadras; senão, a pergunta padrão.
+        const asked = parseTimeDuration(turn.message);
+        if (asked.start || asked.duration) {
+          const found = await listFreeCourts(deps, turn.companyId, turn.context, parsed.date, asked.start, asked.duration);
+          turn.availabilityReply = found.message;
+          return { ok: true, data: parsed.date, quadras_livres: found.list.length };
+        }
+        turn.availabilityReply = askTimeAndDuration(parsed.date);
+        return { ok: true, data: parsed.date, apresentacao: displayDate(parsed.date) };
       }),
-    define('consultar_horarios', 'Consulta todos os horários livres da data informada. Para filtrar por manhã, tarde ou noite, informe periodo. Nunca invente horários ou disponibilidade.',
-      z.object({ quadra: court, data: z.string().describe('Data resolvida AAAA-MM-DD'), duracao_minutos: duration, periodo: z.enum(['todos', 'manha', 'tarde', 'noite']).nullable() }),
+    define('consultar_quadras_livres', 'Lista as quadras livres na data resolvida, conforme o que o cliente informou: horário e duração, só a duração ou só o horário. Informe null no que o cliente não disse. O sistema envia a lista numerada ao cliente.',
+      z.object({ data: z.string().describe('Data resolvida AAAA-MM-DD'), inicio: z.string().nullable().describe('Horário de início HH:MM dito pelo cliente, ou null'), duracao_minutos: duration.nullable().describe('60, 90 ou 120 se o cliente disse a duração, ou null') }),
       async (args, turn) => {
-        const day = String(args.data || ''), found = await deps.resolveCourt(turn.companyId, String(args.quadra || '')), period = String(args.periodo || 'todos'), minutes = Number(args.duracao_minutos);
+        const day = String(args.data || ''), start = args.inicio ? String(args.inicio) : null, minutes = (args.duracao_minutos ?? null) as Duration | null;
+        if (day !== turn.context.confirmedDate) return { ok: false, erro: 'Resolva a data com interpretar_data antes de listar as quadras.' };
+        if (start && !/^([01]\d|2[0-3]):[0-5]\d$/.test(start)) return { ok: false, erro: 'Horário inválido. Pergunte o horário no formato HH:MM.' };
+        if (!start && !minutes) return { ok: false, erro: 'Pergunte o horário e a duração (1h, 1h30 ou 2h) antes de listar as quadras.' };
+        const found = await listFreeCourts(deps, turn.companyId, turn.context, day, start, minutes);
+        turn.availabilityReply = found.message;
+        return { ok: true, quadras: found.list.map((c, index) => ({ numero: index + 1, quadra: c.name, esporte: c.sport })) };
+      }),
+    define('consultar_horarios', 'Lista os horários livres de uma quadra escolhida pelo cliente, na data resolvida e na duração. Use depois que o cliente escolher a quadra (quando ainda não houver horário definido). O sistema envia os horários ao cliente.',
+      z.object({ quadra: courtChoice, data: z.string().describe('Data resolvida AAAA-MM-DD'), duracao_minutos: duration, periodo: z.enum(['todos', 'manha', 'tarde', 'noite']).nullable() }),
+      async (args, turn) => {
+        const day = String(args.data || ''), found = await pickCourt(deps, turn, String(args.quadra || '')), period = String(args.periodo || 'todos'), minutes = Number(args.duracao_minutos);
         if (day !== turn.context.confirmedDate) return { ok: false, erro: 'Resolva a data com interpretar_data antes de consultar horários.' };
-        if (!found) return { ok: false, erro: 'Não encontrei a quadra indicada. Liste as quadras e peça para o cliente escolher.' };
+        if (!found) return { ok: false, erro: 'Não sei qual quadra o cliente escolheu. Pergunte o número da lista enviada.' };
         const free = await deps.availability(turn.companyId, found.id, day, minutes), preview = deps.previewSlots(free.slots, period);
-        turn.context.selectedCourtId = found.id; turn.context.selectedCourtName = found.name; turn.context.awaitingTimeChoice = true;
+        turn.context.selectedCourtId = found.id; turn.context.selectedCourtName = found.name;
         turn.availabilityReply = await deps.availableTimesReply(turn.companyId, found.id, day, minutes, period);
         return { ok: true, open: free.open, quadra: free.quadra, ...preview };
       }),
-    define('preparar_reserva', 'Prepara uma reserva depois de consultar a disponibilidade, obter o nome e, se houver Pix conectado, o e-mail real do cliente. Retorna um resumo e pede confirmação explícita.',
-      z.object({ quadra: court, data: z.string().describe('Data AAAA-MM-DD'), inicio: z.string().describe('Horário HH:MM'), duracao_minutos: duration, nome_cliente: z.string(), email_cliente: t.paymentRequired ? z.string() : z.string().nullable() }),
+    define('preparar_reserva', 'Monta o pedido com quadra, data, início, duração e nome. Se a arena cobra pagamento antecipado e ainda não houver e-mail, chame com email_cliente null: o sistema explica o valor e pede o e-mail. O sistema envia o resumo com a pergunta "Confirma a reserva?".',
+      z.object({ quadra: courtChoice, data: z.string().describe('Data AAAA-MM-DD'), inicio: z.string().describe('Horário HH:MM'), duracao_minutos: duration, nome_cliente: z.string(), email_cliente: z.string().nullable() }),
       async (args, turn) => {
-        const found = await deps.resolveCourt(turn.companyId, String(args.quadra || '')), day = String(args.data || ''), startTime = String(args.inicio || ''), minutes = Number(args.duracao_minutos);
+        const found = await pickCourt(deps, turn, String(args.quadra || '')), day = String(args.data || ''), startTime = String(args.inicio || ''), minutes = Number(args.duracao_minutos);
         const customerName = String(args.nome_cliente || '').trim().slice(0, 100), customerEmail = String(args.email_cliente || '').trim().toLowerCase();
-        if (day !== turn.context.confirmedDate) return { erro: 'Confirme a data com o cliente antes de preparar o pedido.' };
-        if (!found || !/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime) || customerName.length < 2 || (turn.paymentRequired && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail))) return { erro: 'Informe uma quadra, horário válido, nome e, se houver Pix, e-mail real do cliente.' };
+        if (day !== turn.context.confirmedDate) return { erro: 'Resolva a data com interpretar_data antes de preparar o pedido.' };
+        if (!found) return { erro: 'Não sei qual quadra o cliente escolheu. Pergunte o número da lista enviada.' };
+        if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) return { erro: 'Horário inválido. Pergunte o horário de início.' };
+        if (customerName.length < 2) return { erro: 'Pergunte o nome do cliente antes de preparar o pedido.' };
         const free = await deps.availability(turn.companyId, found.id, day, minutes), slot = free.slots.find((x) => x.inicio === startTime);
-        if (!slot) return { erro: 'Esse horário não está livre. Ofereça horários da consulta de disponibilidade.' };
+        if (!slot) return { erro: 'Esse horário não está livre nessa quadra. Ofereça os horários livres dela com consultar_horarios.' };
+        turn.context.selectedCourtId = found.id; turn.context.selectedCourtName = found.name;
+        const pix = brl(chargeAmountCents(slot.amountCents, turn.bot));
+        if (turn.paymentRequired && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail)) {
+          turn.context.awaitingEmail = true;
+          return reply(turn, `Para garantir a reserva, a arena pede um pagamento antecipado de ${pix} via Pix (valor total ${slot.valor}).\n\nQual é o seu e-mail? Ele é usado só para gerar o Pix.`);
+        }
+        delete turn.context.awaitingEmail;
         const pending: PendingBooking = { courtId: found.id, courtName: found.name, date: day, startTime, durationMinutes: minutes, customerName, customerEmail, amountCents: slot.amountCents, createdAt: new Date().toISOString() };
         turn.context.pendingBooking = pending;
         const end = deps.timeHH(Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)) + minutes);
-        return { preparada: true, resumo: `📝 *Confira seu pedido*\n\n🏟️ Quadra: ${found.name}\n📅 Data: ${displayDate(day)}\n🕒 Horário: ${startTime} às ${end}\n⏱️ Duração: ${minutes} minutos\n💰 Valor total: ${slot.valor}\n${turn.paymentRequired ? `💳 Pix agora: ${brl(chargeAmountCents(slot.amountCents, turn.bot))}` : '👤 Confirmação pela equipe, sem pagamento antecipado'}\n\nPeça confirmação explícita antes de registrar.` };
+        return reply(turn, `📝 Confira seu pedido:\n\n🏟️ Quadra: ${found.name}\n📅 Data: ${displayDate(day)}\n🕒 Horário: ${startTime} às ${end}\n⏱️ Duração: ${minutes} minutos\n💰 Valor total: ${slot.valor}\n${turn.paymentRequired ? `💳 Pix agora: ${pix}` : '👤 O pagamento é feito na arena.'}\n\nConfirma a reserva?`);
       }),
   ];
-  if (t.canConfirm) tools.push(define('confirmar_reserva', 'Registra um pedido de reserva pendente após o cliente confirmar explicitamente o resumo. A arena ou o pagamento ainda precisam confirmar.', empty,
+  if (t.canConfirm) tools.push(define('confirmar_reserva', 'Registra o pedido depois que o cliente confirmar o resumo. Com pagamento antecipado, o sistema já envia o Pix.', empty,
     async (_args, turn) => {
-      const pending = turn.context.pendingBooking as PendingBooking | undefined;
-      if (!pending) return { erro: 'Não há reserva aguardando confirmação.' };
-      try {
-        const item = await deps.createConfirmedBooking(turn.companyId, turn.phone, pending);
-        let paymentStatus = turn.bot.paymentMode === 'none' ? 'sem_cobranca' : 'sem_mercado_pago';
-        if (turn.paymentRequired && item.amountCents > 0) {
-          try { paymentStatus = await deps.sendBookingPix(turn.companyId, turn.session, turn.phone, item.id, pending.customerEmail || ''); }
-          catch (error) { console.error('whatsapp_pix_send_failed', error instanceof Error ? error.message : 'unknown'); paymentStatus = 'falha_no_envio_do_pix'; }
-        }
-        await db.insert(appAudit).values({ id: randomUUID(), companyId: turn.companyId, userId: null, action: 'whatsapp.booking.created', entity: 'booking', entityId: item.id, details: { paymentStatus }, createdAt: new Date().toISOString() });
-        delete turn.context.pendingBooking;
-        turn.facts.bookingCreated = true; turn.facts.pixSent = ['codigo_e_qr_enviados', 'codigo_enviado_sem_imagem', 'ja_enviado'].includes(paymentStatus);
-        turn.bookingReply = turn.facts.pixSent ? '' : paymentStatus === 'falha_no_envio_do_pix' ? 'Seu pedido foi registrado e está aguardando pagamento, mas não consegui enviar o Pix. A equipe vai verificar.' : 'Seu pedido foi registrado e está pendente de confirmação pela equipe.';
-        return { solicitacao_criada: true, status: 'pendente', quadra: item.courtName, valor_total: brl(item.amountCents), pix_agora: turn.paymentRequired ? brl(chargeAmountCents(item.amountCents, turn.bot)) : null, pagamento: paymentStatus };
-      } catch (error) {
-        delete turn.context.pendingBooking;
-        return { erro: error instanceof Error ? error.message : 'O horário não está mais disponível. Consulte novamente.' };
-      }
+      const done = await confirmPendingBooking(deps, turn);
+      if (done.error) return { erro: done.error };
+      turn.facts.bookingCreated = true; turn.facts.pixSent = done.pixSent;
+      turn.bookingReply = done.reply;
+      return { solicitacao_criada: true, pagamento: done.paymentStatus };
     }));
   return tools;
 }

@@ -49,6 +49,9 @@ export async function deliverOne(id?:string){
    if(due>Date.now()){await db.update(whatsappDeliveries).set({status:'pending',dueAt:new Date(due).toISOString(),updatedAt:now}).where(eq(whatsappDeliveries.id,job.id));return true;}
    if(bookingInstant(b.endAt,bot.timeZone)<Date.parse(cfg.reviewEnabledAt)||Date.now()-due>86400000){await finish('skipped');return true;}
    text=cfg.reviewMessage.replace(/\{(nome|arena_name|review_link)\}/g,(_,key:string)=>({nome:b.customerName,arena_name:info.nome,review_link:info.reviewUrl})[key]!);
+  }else if(job.kind==='expired'&&!group){
+   const p=job.payload;
+   text=`⏰ O prazo do Pix acabou e a reserva de ${p.court}, ${String(p.start).slice(0,10).split('-').reverse().join('/')} das ${String(p.start).slice(11,16)} às ${String(p.end).slice(11,16)}, foi cancelada. O horário voltou a ficar disponível.\n\nSe ainda quiser jogar, é só me chamar que faço uma nova reserva.`;
   }else if(labels[job.kind]){
    const p=job.payload;const base=(process.env.APP_BASE_URL||'').replace(/\/$/,'');
    text=`${labels[job.kind]} · ${p.arena}\n${p.customerName}${p.phone?` · ${p.phone}`:''}\n${p.court}\n${String(p.start).slice(0,10).split('-').reverse().join('/')} · ${String(p.start).slice(11,16)} às ${String(p.end).slice(11,16)}${job.kind==='paid'&&p.bookingStatus==='cancelled'?'\nAtenção: reserva cancelada. Analisar o pagamento e eventual estorno.':''}\n${base}/reservas`;

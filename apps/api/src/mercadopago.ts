@@ -1,4 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+/** Validade do Pix da reserva pelo WhatsApp; o horário fica guardado só por esse tempo. */
+export const PIX_MINUTES=15;
 import { syncBookingReceivable } from './booking-finance.js';
 import { and, desc, eq, lt, ne, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
@@ -35,7 +37,7 @@ export async function createBookingPixCharge(companyId:string,id:string,payerEma
  const policy=await getSettings(companyId,'whatsapp_bot') as unknown as PaymentPolicy;const chargedCents=chargeAmountCents(row.booking.amountCents,policy);if(chargedCents<1)throw fail(409,'A arena não configurou cobrança antecipada para reservas.');
  const amount=(chargedCents/100).toFixed(2),base=(process.env.APP_BASE_URL||'').replace(/\/$/,'');
  if(!base)throw fail(503,'Configure o endereço público para receber a confirmação do Pix.');
- const expiresAt=new Date(Date.now()+30*60*1000).toISOString();
+ const expiresAt=new Date(Date.now()+PIX_MINUTES*60*1000).toISOString();
  const response=await fetch(`${MP_API}/v1/payments`,{method:'POST',headers:{Authorization:`Bearer ${await tokenFor(companyId)}`,'Content-Type':'application/json','X-Idempotency-Key':`quadrasflow-pix-${id}`},body:JSON.stringify({transaction_amount:Number(amount),description:`Reserva ${row.courtName} · ${row.arenaName}`,payment_method_id:'pix',external_reference:id,notification_url:`${base}/api/webhooks/mercadopago`,date_of_expiration:expiresAt,payer:{email:payerEmail}}),signal:AbortSignal.timeout(12000)});
  const data=await response.json() as Record<string,unknown>,point=data.point_of_interaction as {transaction_data?:{qr_code?:string;qr_code_base64?:string;ticket_url?:string}}|undefined,details=point?.transaction_data;
  if(!response.ok||!details?.qr_code||!details.qr_code_base64)throw fail(502,'Não foi possível gerar o Pix direto. Confira os dados do pagador e a conta Mercado Pago.');
@@ -49,14 +51,22 @@ export async function processExpiredWhatsAppPix(now=Date.now()){
   if(!configRow.companyId)continue;
   const charges=configRow.settings as Record<string,PixCharge&{expiredAt?:string}>;
   for(const [bookingId,charge] of Object.entries(charges)){
-   if(!charge.paymentId||!charge.expiresAt||Date.parse(charge.expiresAt)>now||charge.expiredAt||(charge.lastExpiryCheckAt&&now-Date.parse(charge.lastExpiryCheckAt)<5*60*1000))continue;
+   if(!charge.paymentId||!charge.expiresAt||Date.parse(charge.expiresAt)>now||charge.expiredAt||(charge.lastExpiryCheckAt&&now-Date.parse(charge.lastExpiryCheckAt)<60*1000))continue;
    const booking=(await db.select().from(bookings).where(and(eq(bookings.id,bookingId),eq(bookings.companyId,configRow.companyId),eq(bookings.status,'pending'))).limit(1))[0];
    if(!booking)continue;
    const checkedAt=new Date(now).toISOString(),currentSettings=await getSettings(configRow.companyId,'mp_pix');const latestCharge=(currentSettings as Record<string,PixCharge>)[bookingId];if(latestCharge?.paymentId!==charge.paymentId)continue;await saveSettings(configRow.companyId,'mp_pix',{...currentSettings,[bookingId]:{...latestCharge,lastExpiryCheckAt:checkedAt}});
    let payment:Record<string,unknown>;
    try{const response=await fetch(`${MP_API}/v1/payments/${encodeURIComponent(charge.paymentId)}`,{headers:{Authorization:`Bearer ${await tokenFor(configRow.companyId)}`},signal:AbortSignal.timeout(10000)});if(!response.ok)continue;payment=await response.json() as Record<string,unknown>;}catch{continue;}
    if(String(payment.id)!==charge.paymentId||String(payment.external_reference)!==bookingId||String(payment.currency_id)!=='BRL')continue;
-   if(!['cancelled','rejected','expired'].includes(String(payment.status)))continue;
+   if(String(payment.status)==='approved')continue; // pago: o webhook confirma a reserva
+   if(!['cancelled','rejected','expired'].includes(String(payment.status))){
+    // Prazo acabou sem pagamento: cancela o Pix no Mercado Pago (não pode mais ser pago) e libera o horário.
+    let cancelled=false;
+    try{const r=await fetch(`${MP_API}/v1/payments/${encodeURIComponent(charge.paymentId)}`,{method:'PUT',headers:{Authorization:`Bearer ${await tokenFor(configRow.companyId)}`,'Content-Type':'application/json'},body:JSON.stringify({status:'cancelled'}),signal:AbortSignal.timeout(10000)});const body=r.ok?await r.json() as Record<string,unknown>:{};if(String(body.status)==='approved')continue;cancelled=r.ok&&String(body.status)==='cancelled';}catch{}
+    // Se o Mercado Pago não responder, espera mais 10 minutos antes de liberar por conta própria.
+    if(!cancelled&&now<Date.parse(charge.expiresAt)+10*60*1000)continue;
+    payment={...payment,status:cancelled?'cancelled':'expired'};
+   }
    const stamp=new Date(now).toISOString();let expired=false;
    await db.transaction(async tx=>{
     const locked=(await tx.select().from(bookings).where(and(eq(bookings.id,bookingId),eq(bookings.companyId,configRow.companyId))).for('update'))[0];
