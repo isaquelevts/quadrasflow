@@ -1,7 +1,7 @@
 import {arenaInformation,serviceSettings,handoff,ownBookings,prepareCancellation,cancelOwnBooking,queueCourtPhotos} from './whatsapp-services.js';
 import {deliverOne} from './whatsapp-delivery-worker.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { and, asc, desc, eq, gte, lt, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import sharp from 'sharp';
 import { appAudit, blockedSlots, bookingEvents, bookings, clients, companies, companyHours, companyPriceSlots, courts, integrationSettings, messageTemplates, monthlyMembers, webhookEvents, whatsappConversations, whatsappMessages, whatsappDeliveries } from '@quadrasflow/database';
@@ -9,8 +9,9 @@ import { db } from './database.js';
 import { bookingAmountCents } from './pricing.js';
 import { createBookingPixCharge, linkChargeCents, PIX_MINUTES } from './mercadopago.js';
 import { botPaused, DEFAULT_OUTSIDE_HOURS_MESSAGE, isOutsideHumanHours, LEGACY_OUTSIDE_HOURS_MESSAGE, outsideHoursText, wantsHuman } from './whatsapp-handoff-rules.js';
-import { confirmPendingBooking, listFreeCourts, runWhatsAppAgent, type AgentDeps, type PendingBooking } from './whatsapp-agent.js';
+import { confirmPendingBooking, listFreeCourts, prepareBookingSummary, priceReply, runWhatsAppAgent, type AgentDeps, type PendingBooking } from './whatsapp-agent.js';
 import { durationLabel, parseTimeDuration, type Duration } from './whatsapp-court-search.js';
+import { DATE_QUESTION, NAME_QUESTION, askDurationText, isGreeting, isPriceQuestion, isReserveIntent, matchCourt, parseBareTime, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
 import { durationChoices, durationError, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { confirmsSummary } from './whatsapp-confirm.js';
 import { isSimulating, runSimulation, simulationNote, simulatorPhone, SIMULATOR_PREFIX } from './whatsapp-simulation.js';
@@ -109,9 +110,9 @@ function previewSlots(slots:AvailabilitySlot[],period:string){
 async function availableTimesReply(companyId:string,courtId:string,day:string,duration=60,period='todos'){
  const free=await availability(companyId,courtId,day,duration),preview=previewSlots(free.slots,period);
  if(!free.open)return `A arena está fechada em ${displayDate(day)}. Qual outro dia você prefere?`;
- if(!preview.total)return `Não encontrei horários livres para ${duration} minutos em ${displayDate(day)}. Prefere outro dia ou outra duração?`;
+ if(!preview.total)return `Não encontrei horários livres de ${durationLabel(duration)} em ${displayDate(day)}. Prefere outro dia ou outra duração?`;
  const scope=period==='manha'?'da manhã':period==='tarde'?'da tarde':period==='noite'?'da noite':'do dia';
- return `Para ${free.quadra} em ${displayDate(day)}, estes são todos os horários disponíveis ${scope} para ${duration} minutos:\n\n${preview.slots.map(slot=>`🕒 ${slot.inicio}`).join('\n')}\n\nQual horário você prefere?`;
+ return `Para ${free.quadra} em ${displayDate(day)}, estes são todos os horários disponíveis ${scope} para ${durationLabel(duration)}:\n\n${preview.slots.map(slot=>`🕒 ${slot.inicio}`).join('\n')}\n\nQual horário você prefere?`;
 }
 async function createConfirmedBooking(companyId:string,phone:string,pending:PendingBooking){
  if(Date.now()-Date.parse(pending.createdAt)>15*60*1000)throw new Error('A confirmação expirou. Consulte os horários novamente.');
@@ -145,12 +146,14 @@ async function isBotPaused(companyId:string,phone:string,conversation:{step:stri
 async function handleIncoming(company:{id:string;name:string},session:string,payload:Record<string,unknown>){const phone=digits(String(payload.from||'').split('@')[0]),message=String(payload.body||'').trim().slice(0,1000),key=message.toLocaleLowerCase('pt-BR');if(!isPrivateIncomingPayload(payload)||phone.length<10||!message)return;const bot=await botConfig(company.id),paymentRequired=bot.paymentMode!=='none'&&await mercadoPagoConnected(company.id),receivedAt=new Date(String(payload.receivedAt||new Date().toISOString()));if(!bot.enabled)return;const conversation=(await db.select().from(whatsappConversations).where(and(eq(whatsappConversations.companyId,company.id),eq(whatsappConversations.phone,phone))).limit(1))[0],context=(conversation?.context||{}) as Record<string,unknown>,step=conversation?.step||'';
 
  context.serviceRequestId=String(payload.id||randomUUID());
+ // Marcas de "acabei de enviar o menu / os valores": valem só para a próxima mensagem.
+ const menuShown=Boolean(context.menu),priceAsked=Boolean(context.priceAsked),menuChoice=menuShown&&/^\s*[12]\uFE0F?\u20E3?\s*$/.test(message)?message.replace(/\D/g,''):'';delete context.menu;delete context.priceAsked;
  // Conversa parada há mais de 6 horas recomeça a reserva do zero (não arrasta data/quadra de outro dia).
  if(conversation&&receivedAt.getTime()-Date.parse(await previousActivity(company.id,phone,receivedAt,conversation.updatedAt))>6*3600000)for(const k of ['confirmedDate','search','courtOptions','selectedCourtId','selectedCourtName','pendingBooking','awaitingEmail','awaitingTimeChoice','awaitingCourtChoice','intervalStage','intervalReservation','pendingDate','confirmedInterval'])delete context[k];
  if(await isBotPaused(company.id,phone,conversation,bot,receivedAt)){
   await db.update(whatsappConversations).set({updatedAt:new Date().toISOString()}).where(and(eq(whatsappConversations.companyId,company.id),eq(whatsappConversations.phone,phone)));return;
  }
- if(wantsHuman(message)){
+ if(wantsHuman(message)||menuChoice==='2'){
   // Fora do horário humano o bot não pausa: deixa o recado para a equipe e segue atendendo reservas.
   const outside=isOutsideHumanHours(bot,receivedAt);
   await handoff(company.id,phone,'Cliente solicitou atendimento humano',message,{pause:!outside});
@@ -164,7 +167,7 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   catch{await handoff(company.id,phone,'Cancelamento precisa de análise',message);await sendText(company.id,session,phone,'Não consegui concluir o cancelamento. Encaminhei para a equipe verificar.');}return;
  }
  if(cancellation){delete context.pendingCancellation;delete context.cancellationFlow;delete context.cancellationOptions;await saveConversationState(company.id,phone,'',context);if(/^(não|nao|desisti)[.! ]*$/i.test(message)){await sendText(company.id,session,phone,'Tudo bem, sua reserva foi mantida.');return;}}
- if(key==='menu'){await saveConversationState(company.id,phone,'',{});await sendText(company.id,session,phone,`Como posso ajudar?\n1️⃣ Reservar uma quadra\n2️⃣ Falar com a equipe`);return;}
+ if(key==='menu'){await saveConversationState(company.id,phone,'',{menu:true});await sendText(company.id,session,phone,`Como posso ajudar?\n1️⃣ Reservar uma quadra\n2️⃣ Falar com a equipe`);return;}
  if(/cancel|desist/i.test(message)){context.cancellationFlow=true;delete context.pendingBooking;delete context.intervalStage;delete context.intervalReservation;delete context.courtOptions;}
  if(/foto|imagem|imagens/i.test(message))context.photoRequested=true;
  if(context.cancellationFlow||context.photoRequested||/instagram|localiza|endere[çc]o|onde (?:fica|voc)|avalia[çc]/i.test(message)){
@@ -175,6 +178,18 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  if(!bot.timeZone){await handoff(company.id,phone,'Arena sem fuso configurado',message);await sendText(company.id,session,phone,'Vou chamar a equipe para ajudar com a sua reserva.');return;}
  const pending=context.pendingBooking as PendingBooking|undefined,fresh=Boolean(pending&&Date.now()-Date.parse(pending.createdAt)<15*60*1000);
  if(pending&&!fresh)delete context.pendingBooking;
+ // 0) conversa de entrada: boas-vindas, pergunta do dia e valores são texto do sistema (a IA não reescreve).
+ if(aiConfigured()&&!pending){
+  const fixed=await (async():Promise<string|undefined>=>{
+   if(isGreeting(message)&&!context.confirmedDate){context.menu=true;return welcomeMenu(company.name,bot.welcome);}
+   if(menuChoice==='1'&&!context.confirmedDate)return DATE_QUESTION;
+   if(isReserveIntent(message)&&!context.confirmedDate)return DATE_QUESTION;
+   if(isPriceQuestion(message)){context.priceAsked=true;return priceReply(company.id,context.confirmedDate?String(context.confirmedDate):undefined);}
+   if(priceAsked&&affirmative(message)&&!context.confirmedDate)return DATE_QUESTION;
+   return undefined;
+  })();
+  if(fixed){await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,fixed);return;}
+ }
  // Passos críticos feitos pelo sistema, sem depender da IA lembrar da ferramenta:
  // 1) "sim" claro ao resumo confirma a reserva e envia o Pix na hora.
  if(aiConfigured()&&pending&&fresh&&confirmsSummary(message)){
@@ -184,15 +199,44 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  }
  // 2) escolha da quadra pelo número da lista, quando já se sabe a duração: mostra os horários livres dela.
  const courtOptions=Array.isArray(context.courtOptions)?(context.courtOptions as unknown[]).map(String):[],search=context.search as {date?:string;start?:string|null;duration?:number|null}|undefined,pick=message.trim().match(/^(?:quadra\s*|op[cç][aã]o\s*)?(\d{1,2})$/i);
- //    (com o horário e sem a duração, pergunta a duração mostrando as que cabem nessa quadra)
- if(aiConfigured()&&!context.pendingBooking&&courtOptions.length&&search?.date&&!(search.start&&search.duration)&&pick){
-  const id=courtOptions[Number(pick[1])-1],court=id?(await db.select({id:courts.id,name:courts.name}).from(courts).where(and(eq(courts.id,id),eq(courts.companyId,company.id))).limit(1))[0]:undefined;
-  if(court&&search.duration){context.selectedCourtId=court.id;context.selectedCourtName=court.name;await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,await availableTimesReply(company.id,court.id,search.date,search.duration));return;}
-  if(court&&search.start){
+ //    Reconhece o número ou o nome ("pode ser a society 1") e segue sem repetir a lista de quadras.
+ const proceedToBooking=async(court:{id:string;name:string},day:string,start:string,minutes:number):Promise<string>=>{
+  delete context.timesShown;context.search={date:day,start,duration:minutes};context.selectedCourtId=court.id;context.selectedCourtName=court.name;
+  const unavailable=async()=>{context.timesShown=true;context.search={date:day,start:null,duration:minutes};return `${timeUnavailableText(start,'ocupado')}\n\n${await availableTimesReply(company.id,court.id,day,minutes)}`;};
+  const free=await availability(company.id,court.id,day,minutes);if(!free.slots.some(x=>x.inicio===start))return unavailable();
+  context.chosen={courtId:court.id,courtName:court.name,date:day,start,minutes};
+  const saved=(await db.select({name:clients.name}).from(clients).where(and(eq(clients.companyId,company.id),eq(clients.phone,phone))).limit(1))[0]?.name||'';
+  if(!saved)return NAME_QUESTION;
+  const done=await prepareBookingSummary(agentDeps,{companyId:company.id,context,bot,paymentRequired},{court,day,startTime:start,minutes,customerName:saved,customerEmail:''});
+  return 'erro' in done?unavailable():done.reply;
+ };
+ const reply_=async(text:string)=>{await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,text);};
+ const named=aiConfigured()&&!context.pendingBooking&&courtOptions.length&&search?.date?await db.select({id:courts.id,name:courts.name}).from(courts).where(and(eq(courts.companyId,company.id),inArray(courts.id,courtOptions))):[],
+  chosenId=named.length?matchCourt(message,courtOptions.map(id=>named.find(c=>c.id===id)).filter((c):c is {id:string;name:string}=>Boolean(c))):null;
+ if(chosenId&&search?.date){
+  const court=named.find(c=>c.id===chosenId)!,day=search.date;context.selectedCourtId=court.id;context.selectedCourtName=court.name;
+  if(search.start&&search.duration){await reply_(await proceedToBooking(court,day,search.start,search.duration));return;}
+  if(search.duration){context.timesShown=true;await reply_(await availableTimesReply(company.id,court.id,day,search.duration));return;}
+  if(search.start){
    // Se não cabe por X minutos, não cabe por mais: para na primeira duração que não cabe.
-   const fits:string[]=[];for(const minutes of durationChoices(await arenaMaxDuration(company.id))){const free=await availability(company.id,court.id,search.date,minutes);if(!free.slots.some(x=>x.inicio===search.start))break;fits.push(durationLabel(minutes));}
-   if(fits.length){context.selectedCourtId=court.id;context.selectedCourtName=court.name;await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,`⏱️ A ${court.name} está livre às ${search.start} por ${fits.length>3?`de ${fits[0]} até ${fits.at(-1)}`:fits.join(', ').replace(/, ([^,]*)$/,' ou $1')}. Qual duração você prefere?`);return;}
+   const fits:number[]=[];for(const minutes of durationChoices(await arenaMaxDuration(company.id))){const free=await availability(company.id,court.id,day,minutes);if(!free.slots.some(x=>x.inicio===search.start))break;fits.push(minutes);}
+   if(fits.length){await reply_(askDurationText(court.name,search.start,fits));return;}
+   context.timesShown=true;context.search={date:day,start:null,duration:60};await reply_(`${timeUnavailableText(search.start,'ocupado')}\n\n${await availableTimesReply(company.id,court.id,day,60)}`);return;
   }
+ }
+ //    Só faltava a duração: o cliente responde "1 hora" e o sistema segue para o nome ou o resumo.
+ const answer=parseTimeDuration(message);
+ if(aiConfigured()&&!context.pendingBooking&&context.selectedCourtId&&search?.date&&search.start&&!search.duration&&answer.duration){
+  const maxDuration=await arenaMaxDuration(company.id),court={id:String(context.selectedCourtId),name:String(context.selectedCourtName||'')};
+  await reply_(validDuration(answer.duration,maxDuration)?await proceedToBooking(court,search.date,search.start,answer.duration):`${durationError(maxDuration)} Qual duração você prefere?`);return;
+ }
+ //    Horário escolhido da lista ("20", "às 20h"): o sistema confere na agenda antes de responder.
+ const timePick=parseBareTime(message);
+ if(aiConfigured()&&!context.pendingBooking&&context.timesShown&&context.selectedCourtId&&search?.date&&search.duration&&timePick){
+  const court={id:String(context.selectedCourtId),name:String(context.selectedCourtName||'')},day=search.date,minutes=search.duration,free=await availability(company.id,court.id,day,minutes);
+  if(free.slots.some(x=>x.inicio===timePick)){await reply_(await proceedToBooking(court,day,timePick,minutes));return;}
+  const now=localNow(bot.timeZone,receivedAt);
+  await reply_(`${timeUnavailableText(timePick,day===now.date&&timePick<=now.time?'passou':'ocupado')}\n\n${await availableTimesReply(company.id,court.id,day,minutes)}`);return;
  }
  // 3) com a data já escolhida e ainda sem quadra, horário e/ou duração na mensagem: lista as quadras livres.
  const asked=parseTimeDuration(message),mentionsDate=/\b(hoje|amanh[ãa]|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|dia \d)|\d{1,2}\/\d{1,2}/i.test(message);

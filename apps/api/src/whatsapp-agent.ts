@@ -9,7 +9,7 @@ import {
 import OpenAI from 'openai';
 import { z } from 'zod';
 import { and, asc, desc, eq, gte, sql } from 'drizzle-orm';
-import { appAudit, clients, companies, courts, whatsappDeliveries, whatsappMessages } from '@quadrasflow/database';
+import { appAudit, clients, companies, companyHours, companyPriceSlots, courts, whatsappDeliveries, whatsappMessages } from '@quadrasflow/database';
 import { db } from './database.js';
 import { displayDate, localNow, parseArenaDate } from './arena-dates.js';
 import { chargeAmountCents, type PaymentPolicy } from './payment-policy.js';
@@ -19,7 +19,8 @@ import { simulationNote } from './whatsapp-simulation.js';
 import { unsupportedClaim } from './whatsapp-agent-claims.js';
 import { freeCourtsMessage, parseTimeDuration, searchFreeCourts, type Duration } from './whatsapp-court-search.js';
 import { dateSaidByClient } from './whatsapp-date-guard.js';
-import { durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
+import { durationLabel, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
+import { DATE_QUESTION, priceMessage } from './whatsapp-flow.js';
 import { isOutsideHumanHours, outsideHoursText, type HumanHours } from './whatsapp-handoff-rules.js';
 
 export type PendingBooking = { courtId: string; courtName: string; date: string; startTime: string; durationMinutes: number; customerName: string; customerEmail?: string; amountCents: number; createdAt: string };
@@ -51,7 +52,7 @@ type Turn = {
   /** Respostas formatadas pelo sistema que substituem o texto da IA ao fim da rodada de ferramentas. */
   bookingReply?: string | undefined; availabilityReply?: string | undefined;
   /** O que as ferramentas realmente fizeram, para o guardrail de saída. */
-  facts: { bookingCreated: boolean; bookingsListed: boolean; pixSent: boolean };
+  facts: { bookingCreated: boolean; bookingsListed: boolean; pixSent: boolean; availabilityChecked: boolean; pricesChecked: boolean };
   fromSystem: boolean;
 };
 
@@ -93,11 +94,13 @@ function instructions(t: Turn, companyName: string, savedCustomerName: string) {
   const tomorrow = new Date(`${now.date}T12:00:00Z`); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
   const search = c.search as { date?: string; start?: string | null; duration?: number | null } | undefined;
   const pending = c.pendingBooking as PendingBooking | undefined;
+  const chosen = c.chosen as { courtName: string; date: string; start: string; minutes: number } | undefined;
   const state = [
     `Data escolhida: ${c.confirmedDate ? `${displayDate(String(c.confirmedDate))} (use ${c.confirmedDate} nas ferramentas)` : 'nenhuma'}.`,
     search ? `Última busca de quadras: ${search.start ? `início ${search.start}` : 'sem horário'}, ${search.duration ? `${search.duration} minutos` : 'sem duração'} (lista numerada já enviada ao cliente).` : 'Nenhuma lista de quadras enviada ainda.',
     `Quadra escolhida pelo cliente: ${c.selectedCourtName || 'nenhuma'}.`,
     `Nome salvo do cliente: ${savedCustomerName || 'nenhum'}.`,
+    chosen && !pending ? `Reserva em andamento (já conferida na agenda): ${chosen.courtName}, ${chosen.date}, início ${chosen.start}, ${chosen.minutes} minutos. Falta o nome${t.paymentRequired ? ' e o e-mail' : ''}: use salvar_contato e preparar_reserva com exatamente estes dados.` : '',
     pending ? `Resumo enviado aguardando "sim": ${pending.courtName}, ${pending.date} ${pending.startTime}, ${pending.durationMinutes} min.` : '',
     c.awaitingEmail ? 'O sistema já explicou o pagamento antecipado e pediu o e-mail.' : '',
     c.cancellationFlow ? 'O cliente está tratando de cancelamento.' : '',
@@ -113,7 +116,7 @@ Você é o atendente de reservas da *${companyName || 'arena'}* no WhatsApp. Esc
 Hoje é ${displayDate(now.date)}. Amanhã será ${displayDate(tomorrow.toISOString().slice(0, 10))}. Agora são ${now.time} (${t.bot.timeZone}).
 
 # Fluxo da reserva (siga nesta ordem; uma pergunta por vez; aproveite tudo o que o cliente já disse)
-1. Se o cliente só cumprimentar, ofereça: 1️⃣ Reservar uma quadra e 2️⃣ Falar com a equipe. Se ele escolher reservar sem dizer a data, pergunte: "Ótimo! Para qual dia você quer reservar a quadra? 📅".
+1. Se o cliente escolher reservar sem dizer a data, chame perguntar_data: o sistema envia a pergunta do dia. Não escreva nada além disso, nem explique formatos de data.
 2. Data: chame interpretar_data com a expressão que o cliente escreveu. Nunca presuma a data.
 3. Depois de interpretar_data, o sistema já envia a pergunta de horário e duração ou, se o cliente já disse horário ou duração, a lista numerada de quadras livres. Não acrescente nada.
 4. Se o cliente mudar o horário ou a duração, chame consultar_quadras_livres com o que ele disse (null no que não disse). O sistema envia a lista numerada.
@@ -131,6 +134,8 @@ Hoje é ${displayDate(now.date)}. Amanhã será ${displayDate(tomorrow.toISOStri
 - Use somente dados devolvidos pelas ferramentas. Nunca invente quadras, horários, valores, disponibilidade ou status de pagamento.
 - Nunca escolha a quadra, a data, o horário ou a duração pelo cliente.
 - Quando o sistema enviar uma lista ou resumo, não repita nem reescreva.
+- Valor, preço ou "quanto custa": chame consultar_precos; o sistema envia os valores reais e o convite para agendar. Nunca cite valores de cabeça.
+- Nunca diga que um horário está livre, ocupado ou indisponível sem ter consultado uma ferramenta de disponibilidade nesta rodada; o sistema já confere o horário que o cliente escolhe da lista.
 - Durações possíveis: ${durationRangeText(t.maxDuration)}, de 30 em 30 minutos (duracao_minutos de 60 a ${t.maxDuration}).
 - Se uma ferramenta devolver erro ou esclarecimento, siga a instrução dela e pergunte só isso.
 - Não narre ferramentas, consultas ou próximos passos; responda apenas com o resultado ou a pergunta necessária.
@@ -188,7 +193,7 @@ export async function listFreeCourts(deps: AgentDeps, companyId: string, context
 
 /** Esquece a busca anterior (data, quadra escolhida, lista) para não arrastar escolhas antigas. */
 function clearSearch(context: Record<string, unknown>) {
-  for (const key of ['search', 'courtOptions', 'selectedCourtId', 'selectedCourtName', 'pendingBooking', 'awaitingEmail', 'awaitingTimeChoice', 'awaitingCourtChoice', 'intervalStage', 'intervalReservation', 'pendingDate', 'confirmedInterval']) delete context[key];
+  for (const key of ['search', 'courtOptions', 'selectedCourtId', 'selectedCourtName', 'pendingBooking', 'awaitingEmail', 'awaitingTimeChoice', 'awaitingCourtChoice', 'intervalStage', 'intervalReservation', 'pendingDate', 'confirmedInterval', 'timesShown', 'chosen', 'priceAsked', 'menu']) delete context[key];
 }
 /** Quadra pelo número da última lista enviada ou pelo nome. */
 async function pickCourt(deps: AgentDeps, turn: Turn, value: string) {
@@ -196,6 +201,38 @@ async function pickCourt(deps: AgentDeps, turn: Turn, value: string) {
   const number = value.trim().match(/^(?:quadra\s*|op[cç][aã]o\s*)?(\d{1,2})$/i);
   if (number && options.length) { const id = options[Number(number[1]) - 1]; return id ? deps.resolveCourt(turn.companyId, id) : undefined; }
   return deps.resolveCourt(turn.companyId, value);
+}
+
+/**
+ * Confere o horário na agenda e monta o passo seguinte da reserva: pedido do e-mail (pagamento antecipado) ou o resumo com "Confirma a reserva?".
+ * Usada pela ferramenta preparar_reserva e direto pelo sistema quando o cliente já escolheu quadra, horário e duração.
+ */
+export async function prepareBookingSummary(deps: AgentDeps, ctx: { companyId: string; context: Record<string, unknown>; bot: AgentBot; paymentRequired: boolean }, a: { court: Court; day: string; startTime: string; minutes: number; customerName: string; customerEmail: string }): Promise<{ erro: string } | { reply: string }> {
+  const free = await deps.availability(ctx.companyId, a.court.id, a.day, a.minutes), slot = free.slots.find((x) => x.inicio === a.startTime);
+  if (!slot) return { erro: 'Esse horário não está livre nessa quadra. Ofereça os horários livres dela com consultar_horarios.' };
+  ctx.context.selectedCourtId = a.court.id; ctx.context.selectedCourtName = a.court.name;
+  ctx.context.chosen = { courtId: a.court.id, courtName: a.court.name, date: a.day, start: a.startTime, minutes: a.minutes };
+  const pix = brl(chargeAmountCents(slot.amountCents, ctx.bot));
+  if (ctx.paymentRequired && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.customerEmail)) {
+    ctx.context.awaitingEmail = true;
+    return { reply: `Para garantir a reserva, a arena pede um pagamento antecipado de ${pix} via Pix (valor total ${slot.valor}).\n\nQual é o seu e-mail? Ele é usado só para gerar o Pix.` };
+  }
+  delete ctx.context.awaitingEmail;
+  const pending: PendingBooking = { courtId: a.court.id, courtName: a.court.name, date: a.day, startTime: a.startTime, durationMinutes: a.minutes, customerName: a.customerName, customerEmail: a.customerEmail, amountCents: slot.amountCents, createdAt: new Date().toISOString() };
+  ctx.context.pendingBooking = pending;
+  const end = deps.timeHH(Number(a.startTime.slice(0, 2)) * 60 + Number(a.startTime.slice(3)) + a.minutes);
+  return { reply: `📝 Confira seu pedido:\n\n🏟️ Quadra: ${a.court.name}\n📅 Data: ${displayDate(a.day)}\n🕒 Horário: ${a.startTime} às ${end}\n⏱️ Duração: ${durationLabel(a.minutes)}\n💰 Valor total: ${slot.valor}\n${ctx.paymentRequired ? `💳 Pix agora: ${pix}` : '👤 O pagamento é feito na arena.'}\n\nConfirma a reserva?` };
+}
+
+/** Valores reais da arena (tabela por dia e faixa de horário); com a data já escolhida, só daquele dia. */
+export async function priceReply(companyId: string, confirmedDate?: string) {
+  const [active, tariffs, days] = await Promise.all([
+    db.select({ name: courts.name, sport: courts.sport, priceCents: courts.priceCents }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))).orderBy(asc(courts.name)),
+    db.select({ weekday: companyPriceSlots.weekday, startTime: companyPriceSlots.startTime, endTime: companyPriceSlots.endTime, priceCents: companyPriceSlots.priceCents }).from(companyPriceSlots).where(eq(companyPriceSlots.companyId, companyId)),
+    db.select({ weekday: companyHours.weekday, isOpen: companyHours.isOpen, openTime: companyHours.openTime, closeTime: companyHours.closeTime }).from(companyHours).where(eq(companyHours.companyId, companyId)),
+  ]);
+  if (!active.length) return 'Ainda não tenho as quadras cadastradas por aqui. Vou chamar alguém da equipe para te passar os valores.';
+  return confirmedDate ? priceMessage(active, tariffs, days.map((d) => ({ ...d, isOpen: Boolean(d.isOpen) })), displayDate(confirmedDate), new Date(`${confirmedDate}T12:00:00Z`).getUTCDay()) : priceMessage(active, tariffs, days.map((d) => ({ ...d, isOpen: Boolean(d.isOpen) })));
 }
 
 /** Ferramentas do agente. As de reserva só existem quando fazem sentido nesta rodada (ex.: confirmar só depois do "sim"). */
@@ -264,7 +301,7 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
       async (_args, turn) => {
         const list = await db.select({ id: courts.id, name: courts.name, sport: courts.sport, priceCents: courts.priceCents }).from(courts).where(and(eq(courts.companyId, turn.companyId), eq(courts.active, true))).orderBy(asc(courts.name));
         turn.context.courtOptions = list.map((c) => c.id);
-        return { ok: true, quadras: list.map((c, index) => ({ numero: index + 1, quadra: c.name, esporte: c.sport, preco_hora: brl(c.priceCents) })) };
+        return { ok: true, quadras: list.map((c, index) => ({ numero: index + 1, quadra: c.name, esporte: c.sport })), instrucao: 'Para valores use consultar_precos.' };
       }),
     define('chamar_atendente', 'Transfere para atendente HUMANO quando solicitado, quando a pergunta estiver fora do escopo da arena ou exigir decisão da equipe.', z.object({ motivo: z.string(), resumo: z.string() }),
       async (args, turn) => {
@@ -280,7 +317,7 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
         // A IA não pode presumir a data (ex.: inventar "amanhã" quando o cliente só escolheu reservar).
         const said = await db.select({ body: whatsappMessages.body }).from(whatsappMessages).where(and(eq(whatsappMessages.companyId, turn.companyId), eq(whatsappMessages.phone, turn.phone), eq(whatsappMessages.direction, 'in'))).orderBy(desc(whatsappMessages.createdAt)).limit(6);
         if (!dateSaidByClient(String(args.expressao || ''), [turn.message, ...said.map((m) => m.body)]))
-          return { ok: false, erro: 'O cliente ainda não disse a data. Pergunte para qual dia ele quer reservar; não presuma hoje nem amanhã.' };
+          return reply(turn, DATE_QUESTION);
         const parsed = parseArenaDate(String(args.expressao || ''), turn.bot.timeZone, turn.receivedAt);
         if (!parsed.date) return { ok: false, esclarecimento: parsed.question };
         if (parsed.date !== turn.context.confirmedDate) clearSearch(turn.context);
@@ -295,6 +332,10 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
         turn.availabilityReply = askTimeAndDuration(parsed.date, turn.maxDuration);
         return { ok: true, data: parsed.date, apresentacao: displayDate(parsed.date) };
       }),
+    define('perguntar_data', 'Pergunta para qual dia o cliente quer reservar. Use quando ele quiser reservar e ainda não disse a data. O sistema envia a pergunta pronta; não escreva nada.', empty,
+      async (_args, turn) => reply(turn, DATE_QUESTION)),
+    define('consultar_precos', 'Envia os valores reais por hora de cada quadra (com a variação por dia e horário, quando houver). Use quando o cliente perguntar preço, valor ou quanto custa. O sistema envia a mensagem pronta; não escreva nada.', empty,
+      async (_args, turn) => { turn.facts.pricesChecked = true; turn.context.priceAsked = true; return reply(turn, await priceReply(turn.companyId, turn.context.confirmedDate ? String(turn.context.confirmedDate) : undefined)); }),
     define('consultar_quadras_livres', 'Lista as quadras livres na data resolvida, conforme o que o cliente informou: horário e duração, só a duração ou só o horário. Informe null no que o cliente não disse. O sistema envia a lista numerada ao cliente.',
       z.object({ data: z.string().describe('Data resolvida AAAA-MM-DD'), inicio: z.string().nullable().describe('Horário de início HH:MM dito pelo cliente, ou null'), duracao_minutos: duration.nullable().describe(`Minutos (de 60 a ${t.maxDuration}) se o cliente disse a duração, ou null`) }),
       async (args, turn) => {
@@ -303,6 +344,7 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
         if (start && !/^([01]\d|2[0-3]):[0-5]\d$/.test(start)) return { ok: false, erro: 'Horário inválido. Pergunte o horário no formato HH:MM.' };
         if (!start && !minutes) return { ok: false, erro: `Pergunte o horário e a duração (${durationRangeText(turn.maxDuration)}) antes de listar as quadras.` };
         const found = await listFreeCourts(deps, turn.companyId, turn.context, day, start, minutes);
+        turn.facts.availabilityChecked = true;
         turn.availabilityReply = found.message;
         return { ok: true, quadras: found.list.map((c, index) => ({ numero: index + 1, quadra: c.name, esporte: c.sport })) };
       }),
@@ -314,6 +356,8 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
         if (!found) return { ok: false, erro: 'Não sei qual quadra o cliente escolheu. Pergunte o número da lista enviada.' };
         const free = await deps.availability(turn.companyId, found.id, day, minutes), preview = deps.previewSlots(free.slots, period);
         turn.context.selectedCourtId = found.id; turn.context.selectedCourtName = found.name;
+        turn.facts.availabilityChecked = true; turn.context.timesShown = true;
+        turn.context.search = { ...(turn.context.search as object | undefined), date: day, duration: minutes };
         turn.availabilityReply = await deps.availableTimesReply(turn.companyId, found.id, day, minutes, period);
         return { ok: true, open: free.open, quadra: free.quadra, ...preview };
       }),
@@ -326,19 +370,10 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
         if (!found) return { erro: 'Não sei qual quadra o cliente escolheu. Pergunte o número da lista enviada.' };
         if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) return { erro: 'Horário inválido. Pergunte o horário de início.' };
         if (customerName.length < 2) return { erro: 'Pergunte o nome do cliente antes de preparar o pedido.' };
-        const free = await deps.availability(turn.companyId, found.id, day, minutes), slot = free.slots.find((x) => x.inicio === startTime);
-        if (!slot) return { erro: 'Esse horário não está livre nessa quadra. Ofereça os horários livres dela com consultar_horarios.' };
-        turn.context.selectedCourtId = found.id; turn.context.selectedCourtName = found.name;
-        const pix = brl(chargeAmountCents(slot.amountCents, turn.bot));
-        if (turn.paymentRequired && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail)) {
-          turn.context.awaitingEmail = true;
-          return reply(turn, `Para garantir a reserva, a arena pede um pagamento antecipado de ${pix} via Pix (valor total ${slot.valor}).\n\nQual é o seu e-mail? Ele é usado só para gerar o Pix.`);
-        }
-        delete turn.context.awaitingEmail;
-        const pending: PendingBooking = { courtId: found.id, courtName: found.name, date: day, startTime, durationMinutes: minutes, customerName, customerEmail, amountCents: slot.amountCents, createdAt: new Date().toISOString() };
-        turn.context.pendingBooking = pending;
-        const end = deps.timeHH(Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)) + minutes);
-        return reply(turn, `📝 Confira seu pedido:\n\n🏟️ Quadra: ${found.name}\n📅 Data: ${displayDate(day)}\n🕒 Horário: ${startTime} às ${end}\n⏱️ Duração: ${minutes} minutos\n💰 Valor total: ${slot.valor}\n${turn.paymentRequired ? `💳 Pix agora: ${pix}` : '👤 O pagamento é feito na arena.'}\n\nConfirma a reserva?`);
+        const done = await prepareBookingSummary(deps, turn, { court: found, day, startTime, minutes, customerName, customerEmail });
+        if ('erro' in done) return done;
+        turn.facts.availabilityChecked = true;
+        return reply(turn, done.reply);
       }),
   ];
   if (t.canConfirm) tools.push(define('confirmar_reserva', 'Registra o pedido depois que o cliente confirmar o resumo. Com pagamento antecipado, o sistema já envia o Pix.', empty,
@@ -371,6 +406,16 @@ const floodGuard: InputGuardrail = {
   },
 };
 
+const SOFT_KINDS = new Set(['disponibilidade', 'preco', 'robo']);
+const CORRECTIONS: Record<string, string> = {
+  disponibilidade: 'Você não consultou a agenda nesta rodada, então não pode dizer se um horário está livre ou ocupado. Use consultar_horarios ou consultar_quadras_livres, ou pergunte o que falta.',
+  preco: 'Você não consultou os valores. Chame consultar_precos; nunca cite valores de cabeça.',
+  robo: 'Não explique formatos nem dê exemplos ("pode ser uma data…", "em intervalos de 30 minutos"). Para a data chame perguntar_data; para o resto responda de forma curta e natural.',
+  pix: 'O Pix não foi enviado por você. Não afirme envio de Pix.',
+  cancelamento: 'Nada foi cancelado. Não afirme cancelamento.',
+  reserva: 'Nenhuma reserva foi feita. Não afirme reserva feita.',
+};
+
 const honestyGuard: OutputGuardrail = {
   name: 'sem_promessas_falsas',
   execute: async ({ agentOutput, context }) => {
@@ -393,7 +438,7 @@ export async function runWhatsAppAgent(deps: AgentDeps, input: AgentTurnInput): 
     db.select({ name: courts.name }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))),
   ]);
   const paymentRequired = bot.paymentMode !== 'none' && await deps.mercadoPagoConnected(companyId);
-  const turn: Turn = { ...input, bot, paymentRequired, maxDuration: maxDurationOf(company?.publicOptions), facts: { bookingCreated: false, bookingsListed: false, pixSent: false }, fromSystem: false };
+  const turn: Turn = { ...input, bot, paymentRequired, maxDuration: maxDurationOf(company?.publicOptions), facts: { bookingCreated: false, bookingsListed: false, pixSent: false, availabilityChecked: false, pricesChecked: false }, fromSystem: false };
   const session = new WhatsAppHistorySession(companyId, phone, input.message);
   const agent = (correction = '') => new Agent<Turn>({
     name: 'Atendente de reservas',
@@ -419,10 +464,16 @@ export async function runWhatsAppAgent(deps: AgentDeps, input: AgentTurnInput): 
       const claim = error.result.output.outputInfo as { kind: string; excerpt: string };
       simulationNote('note', `Guardrail: a IA afirmou "${claim.excerpt}" sem o sistema ter feito isso. Pedindo nova resposta.`);
       console.warn('whatsapp_ai_guardrail', { companyId, kind: claim.kind });
-      return await attempt(`\nATENÇÃO: sua resposta anterior afirmou "${claim.excerpt}", mas o sistema não registrou essa ação. Responda de novo sem afirmar ${claim.kind === 'pix' ? 'envio de Pix' : claim.kind === 'cancelamento' ? 'cancelamento' : 'reserva feita'}; use as ferramentas ou diga o próximo passo real.`);
+      return await attempt(`\nATENÇÃO: sua resposta anterior continha "${claim.excerpt}". ${CORRECTIONS[claim.kind] ?? 'O sistema não registrou essa ação. Não a afirme; use as ferramentas ou diga o próximo passo real.'}`);
     }
   } catch (error) {
     if (error instanceof InputGuardrailTripwireTriggered) { simulationNote('note', 'Guardrail de entrada: muitas mensagens seguidas; a IA não foi chamada.'); return FLOOD_REPLY; }
+    if (error instanceof OutputGuardrailTripwireTriggered && SOFT_KINDS.has((error.result.output.outputInfo as { kind?: string }).kind ?? '')) {
+      // Disponibilidade, preço e frases de robô não justificam chamar a equipe: o sistema responde com o texto certo.
+      simulationNote('note', 'Guardrail bloqueou a resposta de novo; o sistema respondeu com o texto padrão.');
+      if ((error.result.output.outputInfo as { kind?: string }).kind === 'preco') { turn.facts.pricesChecked = true; return priceReply(companyId, turn.context.confirmedDate ? String(turn.context.confirmedDate) : undefined); }
+      return turn.context.confirmedDate ? askTimeAndDuration(String(turn.context.confirmedDate), turn.maxDuration) : DATE_QUESTION;
+    }
     if (error instanceof OutputGuardrailTripwireTriggered || error instanceof MaxTurnsExceededError) {
       if (error instanceof OutputGuardrailTripwireTriggered) simulationNote('note', 'Guardrail bloqueou a resposta de novo; a equipe foi chamada.');
       await handoff(companyId, phone, 'O agente não conseguiu concluir o pedido', input.message);

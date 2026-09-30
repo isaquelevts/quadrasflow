@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { unsupportedClaim } from './whatsapp-agent-claims.js';
 
-const none = { bookingCreated: false, bookingsListed: false, pixSent: false };
+const none = { bookingCreated: false, bookingsListed: false, pixSent: false, availabilityChecked: false, pricesChecked: false };
 const cases: [string, string, typeof none, string | undefined][] = [
   ['afirma reserva confirmada sem ferramenta', 'Pronto! Sua reserva foi confirmada para amanhã.', none, 'reserva'],
   ['"reservei" em primeira pessoa', 'Reservei a quadra para você às 19h.', none, 'reserva'],
@@ -21,5 +21,16 @@ const cases: [string, string, typeof none, string | undefined][] = [
   ['status vindo da lista de reservas', 'Sua reserva de sábado está confirmada.', { ...none, bookingsListed: true }, undefined],
   ['Pix realmente enviado', 'O Pix foi enviado em mensagens separadas.', { ...none, pixSent: true }, undefined],
   ['Pix citado sem afirmar envio', 'Depois de confirmar, vou gerar o Pix de R$ 60,00.', none, undefined],
+  ['horário indisponível sem consultar (caso real)', 'O horário 20:00 não está disponível. Por favor, escolha um horário entre os disponíveis.', none, 'disponibilidade'],
+  ['horário livre sem consultar (caso real)', 'O horário 21:00 está disponível para Society 1 em 30/09/2026.', none, 'disponibilidade'],
+  ['"às 20h já está reservado" sem consultar', 'Às 20h já está reservado, que tal outro?', none, 'disponibilidade'],
+  ['disponibilidade depois de consultar a agenda', 'O horário 20:00 não está disponível.', { ...none, availabilityChecked: true }, undefined],
+  ['pergunta de horário não é afirmação', 'Qual horário você prefere?', none, undefined],
+  ['valor inventado por hora (caso real)', 'O valor da hora pode variar conforme a quadra e o horário.', none, 'preco'],
+  ['valor da quadra por hora', 'A Areia 1 custa R$ 100 por hora.', none, 'preco'],
+  ['preço depois da ferramenta de preços', 'A Areia 1 custa R$ 100 por hora.', { ...none, pricesChecked: true }, undefined],
+  ['frase de robô ao pedir a data (caso real)', 'Por favor, me diga para qual dia você quer reservar a quadra? Pode ser uma data ou um dia da semana. 📅', none, 'robo'],
+  ['frase de robô na duração (caso real)', 'Pode ser de 1h até 4h, em intervalos de 30 minutos.', none, 'robo'],
+  ['pergunta do dia natural', 'Ótimo! Para qual dia você quer reservar a quadra? 📅', none, undefined],
 ];
 for (const [name, text, facts, expected] of cases) test(name, () => assert.equal(unsupportedClaim(text, facts)?.kind, expected));
