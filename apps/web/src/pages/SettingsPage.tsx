@@ -14,7 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
-import { errorMessage, formatCurrency } from '@/lib/format';
+import { durationLabel, errorMessage, formatCurrency } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 type Hour = { weekday: number; is_open: boolean | number; open_time: string; close_time: string };
@@ -35,6 +35,7 @@ export function SettingsPage() {
   const [section, setSection] = useState<Section>('perfil');
   const [hours, setHours] = useState<Hour[]>([]);
   const [prices, setPrices] = useState<PriceDay[]>([]);
+  const [maxDuration, setMaxDuration] = useState(480);
   const [profile, setProfile] = useState<Profile>({ description: '', address: '', city: '', state: '', amenities: [], photos: [] });
   const [mp, setMp] = useState<MpStatus>({ connected: false, configured: false });
   const [loading, setLoading] = useState(true);
@@ -45,10 +46,11 @@ export function SettingsPage() {
   const publicUrl = user?.company?.slug ? `${window.location.origin}/a/${user.company.slug}` : '';
 
   useEffect(() => {
-    Promise.all([api<{ weeklyHours: Hour[]; prices: PriceDay[]; profile: Profile }>('/api/arena/settings'), api<MpStatus>('/api/integrations/mercadopago')])
+    Promise.all([api<{ weeklyHours: Hour[]; maxDurationMinutes?: number; prices: PriceDay[]; profile: Profile }>('/api/arena/settings'), api<MpStatus>('/api/integrations/mercadopago')])
       .then(([settings, payment]) => {
         setHours(settings.weeklyHours.map((h) => ({ ...h, is_open: Boolean(h.is_open) })));
         setPrices(settings.prices);
+        setMaxDuration(settings.maxDurationMinutes || 480);
         setProfile({ ...settings.profile, amenities: settings.profile.amenities || [], photos: settings.profile.photos || [] });
         setMp(payment);
       })
@@ -65,7 +67,7 @@ export function SettingsPage() {
     catch (cause) { toast.error(errorMessage(cause)); }
     finally { setSaving(null); }
   }
-  const saveHours = () => save('horarios', () => api('/api/arena/settings', { method: 'PUT', body: JSON.stringify({ weeklyHours: hours.map((h) => ({ weekday: h.weekday, isOpen: Boolean(h.is_open), openTime: h.open_time, closeTime: h.close_time })) }) }), 'Horários salvos');
+  const saveHours = () => save('horarios', () => api('/api/arena/settings', { method: 'PUT', body: JSON.stringify({ weeklyHours: hours.map((h) => ({ weekday: h.weekday, isOpen: Boolean(h.is_open), openTime: h.open_time, closeTime: h.close_time })), maxDurationMinutes: maxDuration }) }), 'Horários salvos');
   const savePrices = () => save('precos', () => api('/api/arena/prices', { method: 'PUT', body: JSON.stringify({ prices }) }), 'Preços salvos');
   const saveProfile = () => save('perfil', () => api('/api/arena/profile', { method: 'PUT', body: JSON.stringify({ profile }) }), 'Perfil da arena salvo');
   async function connectMp() {
@@ -120,6 +122,11 @@ export function SettingsPage() {
             </div> : <span className="flex-1 text-[13px] text-muted-foreground">Fechado</span>}
             <Button type="button" variant="ghost" size="sm" className="text-muted-foreground" onClick={() => copyToAll(h)} aria-label={`Copiar horário de ${DAYS[h.weekday]} para todos os dias`}><CopyCheck /> <span className="hidden sm:inline">Copiar para todos</span></Button>
           </li>)}</ul>
+          <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border px-3 py-3">
+            <div className="min-w-0 flex-1"><div className="font-medium" id="duracao-maxima">Duração máxima por reserva</div><p className="text-[12.5px] text-muted-foreground">Vale para a página pública e para o WhatsApp. O mínimo é 1h.</p></div>
+            <Select value={String(maxDuration)} onValueChange={(v) => setMaxDuration(Number(v))}><SelectTrigger className="h-9 w-28 tabular-nums" aria-labelledby="duracao-maxima"><SelectValue /></SelectTrigger>
+              <SelectContent>{DURATIONS.map((m) => <SelectItem key={m} value={String(m)}>{durationLabel(m)}</SelectItem>)}</SelectContent></Select>
+          </div>
         </Card>}
 
         {section === 'precos' && <Card icon={Tags} title="Preços por faixa de horário" sub="Valor por hora em cada faixa. Reservas que cruzam faixas somam cada meia hora pelo preço da sua faixa."
@@ -163,6 +170,7 @@ function SaveButton({ saving, disabled, onClick }: { saving: boolean; disabled?:
 function CopyButton({ value }: { value: string }) {
   return <Button type="button" variant="outline" size="icon" className="size-10" aria-label="Copiar endereço" onClick={() => { void navigator.clipboard?.writeText(value).then(() => toast.success('Link copiado'), () => toast.error('Não foi possível copiar')); }}><Copy /></Button>;
 }
+const DURATIONS = Array.from({ length: 15 }, (_, i) => 60 + i * 30);
 function TimeSelect({ label, value, onChange, options = TIMES }: { label: string; value: string; onChange: (value: string) => void; options?: string[] }) {
   const list = options.includes(value) ? options : [value, ...options];
   return <Select value={value} onValueChange={onChange}><SelectTrigger className="h-9 w-24 tabular-nums" aria-label={label}><SelectValue /></SelectTrigger><SelectContent>{list.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select>;

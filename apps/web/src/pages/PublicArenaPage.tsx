@@ -265,7 +265,7 @@ function BookingPage({ slug }: { slug: string }) {
             </div>
           </Step>
 
-          <Step id="passo-fim" n={4} title="Até que horas?" done={end !== null && start !== null ? `${hm(end)} · ${durationLabel(end - start)}` : ''} locked={start === null} lockedText={`Você pode jogar de 1 a ${maxDuration / 60} horas.`}>
+          <Step id="passo-fim" n={4} title="Até que horas?" done={end !== null && start !== null ? `${hm(end)} · ${durationLabel(end - start)}` : ''} locked={start === null} lockedText={maxDuration === 60 ? "Cada reserva tem 1h." : `Você pode jogar de 1h a ${durationLabel(maxDuration)}.`}>
             {court && start !== null && (() => {
               const ends = endsFor(court.id, start), last = ends.at(-1) ?? start, cut = start + maxDuration > last;
               const why = !cut ? '' : last >= close ? `A arena fecha às ${hm(close)}.` : `A quadra está reservada a partir das ${hm(last)}.`;
@@ -288,7 +288,7 @@ function BookingPage({ slug }: { slug: string }) {
           <section className="rounded-2xl border bg-white p-4 shadow-xs lg:p-6">
             <h2 className="text-base font-semibold">Como funciona</h2>
             <ol className="mt-3 grid gap-3 sm:grid-cols-3">
-              <HowItem icon={CalendarCheck} title="Escolha o horário" text={`De 1 a ${maxDuration / 60} horas, só aparecem horários livres.`} />
+              <HowItem icon={CalendarCheck} title="Escolha o horário" text={maxDuration === 60 ? "Reservas de 1h, só aparecem horários livres." : `De 1h a ${durationLabel(maxDuration)}, só aparecem horários livres.`} />
               {policy ? <HowItem icon={QrCode} title={policy.mode === 'full' ? 'Pague no Pix' : 'Pague o sinal no Pix'} text={`O horário fica guardado por ${data.pix_minutes || 15} minutos até o pagamento.`} />
                 : <HowItem icon={CircleCheck} title="A arena confirma" text="Sem pagamento antecipado: a equipe confirma o pedido." />}
               <HowItem icon={MessageCircle} title="Confirmação no WhatsApp" text={policy && policy.mode !== 'full' ? 'O restante é pago na arena, no dia.' : 'Você recebe tudo pelo WhatsApp.'} />

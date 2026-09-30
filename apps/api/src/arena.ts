@@ -6,6 +6,7 @@ import { db } from './database.js';
 import { isUniqueViolation } from './db-errors.js';
 import type { AuthUser } from './auth.js';
 import { bookingAmountCents } from './pricing.js';
+import { maxDurationOf, validMaxDuration } from './booking-duration.js';
 import { findMonthlyConflict, monthlyConflictMessage } from './monthly-conflict.js';
 import { changeBookingStatus, syncBookingReceivable, type BookingStatus } from './booking-finance.js';
 
@@ -76,16 +77,23 @@ export async function registerArenaRoutes(app: FastifyInstance) {
   app.get('/api/arena/settings', auth, async (request) => {
     const companyId = companyOf(request), [rows, hours, priceRows, courtRows] = await Promise.all([db.select().from(companies).where(eq(companies.id, companyId)).limit(1), getCompanyHours(companyId), db.select().from(companyPriceSlots).where(eq(companyPriceSlots.companyId, companyId)), db.select({ priceCents: courts.priceCents }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))).orderBy(asc(courts.name)).limit(1)]), c = rows[0]!, fallback = courtRows[0]?.priceCents ?? 0;
     const prices = Array.from({ length: 7 }, (_, weekday) => ({ weekday, morning: priceRows.find((p) => p.weekday === weekday && p.band === 'morning')?.priceCents ?? fallback, afternoon: priceRows.find((p) => p.weekday === weekday && p.band === 'afternoon')?.priceCents ?? fallback, evening: priceRows.find((p) => p.weekday === weekday && p.band === 'evening')?.priceCents ?? fallback }));
-    return { company: { id: c.id, name: c.name, slug: c.slug }, weeklyHours: hours.map(toHour), prices, profile: { description: c.description, address: c.address, city: c.city, state: c.state, amenities: c.amenities, photos: c.photos, options: c.publicOptions } };
+    return { company: { id: c.id, name: c.name, slug: c.slug }, weeklyHours: hours.map(toHour), maxDurationMinutes: maxDurationOf(c.publicOptions), prices, profile: { description: c.description, address: c.address, city: c.city, state: c.state, amenities: c.amenities, photos: c.photos, options: c.publicOptions } };
   });
   app.put('/api/arena/settings', auth, async (request) => {
     const user = adminOf(request), companyId = companyOf(request), body = bodyOf(request), input = Array.isArray(body.weeklyHours) ? body.weeklyHours as Array<Record<string, unknown>> : [];
     if (input.length !== 7) throw fail(400, 'Configure os sete dias da semana.');
     const normalized = input.map((h) => ({ weekday: Number(h.weekday), isOpen: h.isOpen === true, openTime: String(h.openTime || ''), closeTime: String(h.closeTime || '') }));
     if (new Set(normalized.map((d) => d.weekday)).size !== 7 || normalized.some((d) => d.weekday < 0 || d.weekday > 6 || !/^([01]\d|2[0-3]):(00|30)$/.test(d.openTime) || !/^([01]\d|2[0-3]):(00|30)$/.test(d.closeTime) || (d.isOpen && d.closeTime <= d.openTime))) throw fail(400, 'Use intervalos de 30 minutos e confira abertura e fechamento.');
-    await db.transaction(async (tx) => { for (const h of normalized) await tx.insert(companyHours).values({ companyId, ...h }).onConflictDoUpdate({ target: [companyHours.companyId, companyHours.weekday], set: { isOpen: h.isOpen, openTime: h.openTime, closeTime: h.closeTime } }); });
+    // Duração máxima por reserva (página pública e WhatsApp); opcional para não quebrar quem só salva os horários.
+    const maxDuration = body.maxDurationMinutes === undefined ? undefined : Number(body.maxDurationMinutes);
+    if (maxDuration !== undefined && !validMaxDuration(maxDuration)) throw fail(400, 'A duração máxima deve ser de 1h a 8h, de 30 em 30 minutos.');
+    await db.transaction(async (tx) => {
+      for (const h of normalized) await tx.insert(companyHours).values({ companyId, ...h }).onConflictDoUpdate({ target: [companyHours.companyId, companyHours.weekday], set: { isOpen: h.isOpen, openTime: h.openTime, closeTime: h.closeTime } });
+      if (maxDuration !== undefined) await tx.update(companies).set({ publicOptions: sql`${companies.publicOptions} || ${JSON.stringify({ maxDurationMinutes: maxDuration })}::jsonb` }).where(eq(companies.id, companyId));
+    });
     await audit(companyId, user.id, 'arena.hours_updated', 'company', companyId);
-    return { weeklyHours: (await getCompanyHours(companyId)).map(toHour) };
+    const saved = (await db.select({ publicOptions: companies.publicOptions }).from(companies).where(eq(companies.id, companyId)).limit(1))[0];
+    return { weeklyHours: (await getCompanyHours(companyId)).map(toHour), maxDurationMinutes: maxDurationOf(saved?.publicOptions) };
   });
   app.put('/api/arena/prices', auth, async (request) => {
     const user = adminOf(request), companyId = companyOf(request), input = Array.isArray(bodyOf(request).prices) ? bodyOf(request).prices as Array<Record<string, unknown>> : [];

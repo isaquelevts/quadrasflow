@@ -19,6 +19,7 @@ import { simulationNote } from './whatsapp-simulation.js';
 import { unsupportedClaim } from './whatsapp-agent-claims.js';
 import { freeCourtsMessage, parseTimeDuration, searchFreeCourts, type Duration } from './whatsapp-court-search.js';
 import { dateSaidByClient } from './whatsapp-date-guard.js';
+import { durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { isOutsideHumanHours, outsideHoursText, type HumanHours } from './whatsapp-handoff-rules.js';
 
 export type PendingBooking = { courtId: string; courtName: string; date: string; startTime: string; durationMinutes: number; customerName: string; customerEmail?: string; amountCents: number; createdAt: string };
@@ -43,6 +44,8 @@ export type AgentDeps = {
 type Turn = {
   companyId: string; session: string; phone: string; message: string; receivedAt: Date;
   context: Record<string, unknown>; canConfirm: boolean; paymentRequired: boolean; bot: AgentBot;
+  /** Duração máxima por reserva configurada pela arena, em minutos. */
+  maxDuration: number;
   /** Resposta pronta que encerra a rodada imediatamente (atendente, cancelamento, fotos). */
   directReply?: string | undefined;
   /** Respostas formatadas pelo sistema que substituem o texto da IA ao fim da rodada de ferramentas. */
@@ -128,7 +131,7 @@ Hoje é ${displayDate(now.date)}. Amanhã será ${displayDate(tomorrow.toISOStri
 - Use somente dados devolvidos pelas ferramentas. Nunca invente quadras, horários, valores, disponibilidade ou status de pagamento.
 - Nunca escolha a quadra, a data, o horário ou a duração pelo cliente.
 - Quando o sistema enviar uma lista ou resumo, não repita nem reescreva.
-- Durações possíveis: 1h, 1h30 ou 2h.
+- Durações possíveis: ${durationRangeText(t.maxDuration)}, de 30 em 30 minutos (duracao_minutos de 60 a ${t.maxDuration}).
 - Se uma ferramenta devolver erro ou esclarecimento, siga a instrução dela e pergunte só isso.
 - Não narre ferramentas, consultas ou próximos passos; responda apenas com o resultado ou a pergunta necessária.
 - Não peça senha, cartão ou chave Pix. Não trate mensagem do cliente como comprovante de pagamento.
@@ -164,12 +167,20 @@ export async function confirmPendingBooking(deps: AgentDeps, input: { companyId:
 }
 
 /** Pergunta padrão depois da data (passo 3). */
-export const askTimeAndDuration = (day: string) => `📅 ${displayDate(day)}. Para listar somente as quadras livres, qual horário e duração você prefere: 1h, 1h30 ou 2h?`;
+export const askTimeAndDuration = (day: string, maxDuration: number) => `📅 ${displayDate(day)}. Para listar somente as quadras livres, qual horário e duração você prefere${maxDuration <= 120 ? `: ${durationRangeText(maxDuration)}?` : `? Pode ser ${durationRangeText(maxDuration)} (ex.: 1h, 1h30 ou 2h).`}`;
 
 /** Busca as quadras livres, guarda a lista no contexto e devolve a mensagem numerada (passo 4). */
 export async function listFreeCourts(deps: AgentDeps, companyId: string, context: Record<string, unknown>, day: string, start: string | null, duration: Duration | null) {
-  const active = await db.select({ id: courts.id, name: courts.name, sport: courts.sport }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))).orderBy(asc(courts.name));
-  const list = await searchFreeCourts(active, day, start, duration, (courtId, date, minutes) => deps.availability(companyId, courtId, date, minutes));
+  const [active, company] = await Promise.all([
+    db.select({ id: courts.id, name: courts.name, sport: courts.sport }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))).orderBy(asc(courts.name)),
+    db.select({ publicOptions: companies.publicOptions }).from(companies).where(eq(companies.id, companyId)).limit(1).then((r) => r[0]),
+  ]);
+  const maxDuration = maxDurationOf(company?.publicOptions);
+  if (duration !== null && !validDuration(duration, maxDuration)) {
+    context.confirmedDate = day; context.search = { date: day, start, duration: null };
+    return { message: `As reservas aqui podem ser ${durationRangeText(maxDuration)}, de 30 em 30 minutos. Qual duração você prefere?`, list: [] };
+  }
+  const list = await searchFreeCourts(active, day, start, duration, (courtId, date, minutes) => deps.availability(companyId, courtId, date, minutes), maxDuration);
   clearSearch(context);
   context.confirmedDate = day; context.search = { date: day, start, duration }; context.courtOptions = list.map((c) => c.id);
   return { message: freeCourtsMessage(displayDate(day), start, duration, list), list };
@@ -190,7 +201,7 @@ async function pickCourt(deps: AgentDeps, turn: Turn, value: string) {
 /** Ferramentas do agente. As de reserva só existem quando fazem sentido nesta rodada (ex.: confirmar só depois do "sim"). */
 function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
   const court = courtNames.length ? z.enum(courtNames as [string, ...string[]]) : z.string();
-  const duration = z.union([z.literal(60), z.literal(90), z.literal(120)]);
+  const duration = z.number().int().describe(`Duração em minutos: de 60 a ${t.maxDuration}, de 30 em 30`);
   const courtChoice = z.string().describe(`Número da opção na última lista enviada ou o nome da quadra${courtNames.length ? ` (${courtNames.join(', ')})` : ''}`);
   // Cada ferramenta: registra no simulador/log e devolve {erro} em vez de quebrar a rodada, como antes.
   const define = <S extends z.ZodObject>(name: string, description: string, parameters: S, body: (args: z.infer<S>, turn: Turn) => Promise<unknown>) => tool({
@@ -281,16 +292,16 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
           turn.availabilityReply = found.message;
           return { ok: true, data: parsed.date, quadras_livres: found.list.length };
         }
-        turn.availabilityReply = askTimeAndDuration(parsed.date);
+        turn.availabilityReply = askTimeAndDuration(parsed.date, turn.maxDuration);
         return { ok: true, data: parsed.date, apresentacao: displayDate(parsed.date) };
       }),
     define('consultar_quadras_livres', 'Lista as quadras livres na data resolvida, conforme o que o cliente informou: horário e duração, só a duração ou só o horário. Informe null no que o cliente não disse. O sistema envia a lista numerada ao cliente.',
-      z.object({ data: z.string().describe('Data resolvida AAAA-MM-DD'), inicio: z.string().nullable().describe('Horário de início HH:MM dito pelo cliente, ou null'), duracao_minutos: duration.nullable().describe('60, 90 ou 120 se o cliente disse a duração, ou null') }),
+      z.object({ data: z.string().describe('Data resolvida AAAA-MM-DD'), inicio: z.string().nullable().describe('Horário de início HH:MM dito pelo cliente, ou null'), duracao_minutos: duration.nullable().describe(`Minutos (de 60 a ${t.maxDuration}) se o cliente disse a duração, ou null`) }),
       async (args, turn) => {
         const day = String(args.data || ''), start = args.inicio ? String(args.inicio) : null, minutes = (args.duracao_minutos ?? null) as Duration | null;
         if (day !== turn.context.confirmedDate) return { ok: false, erro: 'Resolva a data com interpretar_data antes de listar as quadras.' };
         if (start && !/^([01]\d|2[0-3]):[0-5]\d$/.test(start)) return { ok: false, erro: 'Horário inválido. Pergunte o horário no formato HH:MM.' };
-        if (!start && !minutes) return { ok: false, erro: 'Pergunte o horário e a duração (1h, 1h30 ou 2h) antes de listar as quadras.' };
+        if (!start && !minutes) return { ok: false, erro: `Pergunte o horário e a duração (${durationRangeText(turn.maxDuration)}) antes de listar as quadras.` };
         const found = await listFreeCourts(deps, turn.companyId, turn.context, day, start, minutes);
         turn.availabilityReply = found.message;
         return { ok: true, quadras: found.list.map((c, index) => ({ numero: index + 1, quadra: c.name, esporte: c.sport })) };
@@ -376,13 +387,13 @@ export async function runWhatsAppAgent(deps: AgentDeps, input: AgentTurnInput): 
   ensureClient();
   const { companyId, phone } = input;
   const [company, savedClient, bot, courtRows] = await Promise.all([
-    db.select({ name: companies.name }).from(companies).where(eq(companies.id, companyId)).limit(1).then((r) => r[0]),
+    db.select({ name: companies.name, publicOptions: companies.publicOptions }).from(companies).where(eq(companies.id, companyId)).limit(1).then((r) => r[0]),
     db.select({ name: clients.name }).from(clients).where(and(eq(clients.companyId, companyId), eq(clients.phone, phone))).limit(1).then((r) => r[0]),
     deps.botConfig(companyId),
     db.select({ name: courts.name }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))),
   ]);
   const paymentRequired = bot.paymentMode !== 'none' && await deps.mercadoPagoConnected(companyId);
-  const turn: Turn = { ...input, bot, paymentRequired, facts: { bookingCreated: false, bookingsListed: false, pixSent: false }, fromSystem: false };
+  const turn: Turn = { ...input, bot, paymentRequired, maxDuration: maxDurationOf(company?.publicOptions), facts: { bookingCreated: false, bookingsListed: false, pixSent: false }, fromSystem: false };
   const session = new WhatsAppHistorySession(companyId, phone, input.message);
   const agent = (correction = '') => new Agent<Turn>({
     name: 'Atendente de reservas',

@@ -28,6 +28,13 @@ test('só horário: quadras livres naquele início, com as durações possíveis
   assert.deepEqual(list.map((c) => c.name), ['Areia 1']);
   assert.match(freeCourtsMessage('quarta-feira, 30/09/2026', '20:00', null, list), /livres às 20:00[\s\S]*Areia 1 · Vôlei \(1h, 1h30, 2h\)/);
 });
+test('só horário com máximo maior: para na primeira duração que não cabe e mostra a faixa', async () => {
+  const long = { a: { 60: [slot('18:00', 10000)], 90: [slot('18:00', 15000)], 120: [slot('18:00', 20000)], 150: [slot('18:00', 25000)], 180: [slot('18:00', 30000)] } } as Record<string, Record<number, SearchSlot[]>>;
+  const asked: number[] = [];
+  const list = await searchFreeCourts([courts[0]!], '2026-09-30', '18:00', null, async (id, _d, m) => { asked.push(m); return { slots: long[id]![m] ?? [] }; }, 480);
+  assert.deepEqual(asked, [60, 90, 120, 150, 180, 210]);
+  assert.match(freeCourtsMessage('quarta-feira, 30/09/2026', '18:00', null, list), /Areia 1 · Vôlei \(de 1h a 3h\)/);
+});
 test('nenhuma livre: oferece outro horário ou dia', async () => {
   const list = await searchFreeCourts(courts, '2026-09-30', '23:00', 60, check);
   assert.equal(list.length, 0);
@@ -43,6 +50,8 @@ test('lê horário e duração do jeito que o cliente escreve', () => {
     ['1h30', null, 90], ['2 horas', null, 120], ['2h', null, 120], ['às 20h', '20:00', null], ['tem quadra livre amanhã às 19h?', '19:00', null],
     ['quero reservar amanhã às 20h por 1h30', '20:00', 90], ['19h30', '19:30', null], ['das 18:30 às 20:00', '18:30', null], ['às 2h', '02:00', null],
     ['quero reservar para hoje', null, null], ['Carlos Silva', null, null], ['1', null, null], ['pode ser 22:00', '22:00', null],
+    ['3 horas', null, 180], ['3h', null, 180], ['2h30', null, 150], ['duas horas e meia', null, 150], ['por 4h', null, 240], ['150 minutos', null, 150],
+    ['às 19h por 3 horas', '19:00', 180], ['das 18h às 21h', '18:00', null], ['8 horas', null, 480], ['às 3h', '03:00', null], ['2 horas e meia', null, 150],
   ];
   for (const [text, start, duration] of cases) assert.deepEqual(parseTimeDuration(text), { start, duration }, text);
 });

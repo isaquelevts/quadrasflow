@@ -3,7 +3,9 @@
 
 export type SearchCourt = { id: string; name: string; sport: string };
 export type SearchSlot = { inicio: string; valor: string; amountCents: number };
-export type Duration = 60 | 90 | 120;
+import { durationChoices, durationLabel, DEFAULT_MAX_DURATION } from './booking-duration.js';
+
+export type Duration = number;
 type Check = (courtId: string, day: string, durationMinutes: number) => Promise<{ slots: SearchSlot[] }>;
 
 export type FreeCourt =
@@ -11,8 +13,7 @@ export type FreeCourt =
   | (SearchCourt & { mode: 'duracao'; inicios: string[] })
   | (SearchCourt & { mode: 'inicio'; duracoes: Array<{ minutos: Duration; valor: string; amountCents: number }> });
 
-const DURATIONS: Duration[] = [60, 90, 120];
-export const durationLabel = (minutes: number) => (minutes === 60 ? '1h' : minutes === 90 ? '1h30' : minutes === 120 ? '2h' : `${minutes} min`);
+export { durationLabel };
 const endOf = (start: string, minutes: number) => { const total = (Number(start.slice(0, 2)) * 60 + Number(start.slice(3)) + minutes) % 1440; return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`; };
 const KEYCAPS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣'];
 const bullet = (index: number) => KEYCAPS[index] ?? `${index + 1}.`;
@@ -21,9 +22,9 @@ const bullet = (index: number) => KEYCAPS[index] ?? `${index + 1}.`;
  * Quadras livres conforme o que o cliente informou:
  * - horário e duração: livres naquele intervalo exato;
  * - só duração: com algum horário livre dessa duração no dia;
- * - só horário: livres começando naquele horário (com as durações possíveis).
+ * - só horário: livres começando naquele horário (com as durações possíveis até o máximo da arena).
  */
-export async function searchFreeCourts(courts: readonly SearchCourt[], day: string, start: string | null, duration: Duration | null, check: Check): Promise<FreeCourt[]> {
+export async function searchFreeCourts(courts: readonly SearchCourt[], day: string, start: string | null, duration: Duration | null, check: Check, maxDuration = DEFAULT_MAX_DURATION): Promise<FreeCourt[]> {
   const results = await Promise.all(courts.map(async (court): Promise<FreeCourt | null> => {
     if (start && duration) {
       const slot = (await check(court.id, day, duration)).slots.find((s) => s.inicio === start);
@@ -35,9 +36,11 @@ export async function searchFreeCourts(courts: readonly SearchCourt[], day: stri
     }
     if (start) {
       const duracoes: Array<{ minutos: Duration; valor: string; amountCents: number }> = [];
-      for (const minutos of DURATIONS) {
+      // Se não cabe por X minutos a partir desse início, não cabe por mais tempo: para na primeira que não cabe.
+      for (const minutos of durationChoices(maxDuration)) {
         const slot = (await check(court.id, day, minutos)).slots.find((s) => s.inicio === start);
-        if (slot) duracoes.push({ minutos, valor: slot.valor, amountCents: slot.amountCents });
+        if (!slot) break;
+        duracoes.push({ minutos, valor: slot.valor, amountCents: slot.amountCents });
       }
       return duracoes.length ? { ...court, mode: 'inicio', duracoes } : null;
     }
@@ -54,24 +57,36 @@ export function freeCourtsMessage(dateLabel: string, start: string | null, durat
     const base = `${bullet(index)} ${court.name} · ${court.sport}`;
     if (court.mode === 'exato') return `${base} · ${court.slot.valor}`;
     if (court.mode === 'duracao') return `${base} (${court.inicios.length === 1 ? '1 horário livre' : `${court.inicios.length} horários livres`})`;
-    return `${base} (${court.duracoes.map((d) => durationLabel(d.minutos)).join(', ')})`;
+    const labels = court.duracoes.map((d) => durationLabel(d.minutos));
+    return `${base} (${labels.length > 3 ? `de ${labels[0]} a ${labels.at(-1)}` : labels.join(', ')})`;
   });
   const next = start && duration ? 'Qual quadra você prefere? Envie o número.' : 'Qual quadra você prefere? Envie o número que eu mostro os horários livres dela.';
   return `📅 ${dateLabel}, ${start && duration ? `${when}, estas quadras estão livres` : `quadras ${when}`}:\n\n${lines.join('\n')}\n\n${next}`;
 }
 
 const norm = (value: string) => value.toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[̀-ͯ]/g, '');
+const WORDS: Record<string, number> = { um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8 };
+const count = (value: string) => WORDS[value] ?? Number(value);
 /**
- * Horário e duração escritos pelo cliente ("às 21h", "21:00", "19h30", "1 hora", "1h30", "hora e meia", "2 horas").
- * "1h"/"2h" soltos são duração; horário precisa de "às/das" ou ser a partir das 5h (ninguém joga à 1h da manhã por engano).
+ * Horário e duração escritos pelo cliente ("às 21h", "21:00", "19h30", "1 hora", "1h30", "hora e meia", "3 horas", "2h30").
+ * "1h" a "4h" soltos são duração; horário precisa de "às/das" ou ser a partir das 5h (ninguém joga à 1h da manhã por engano).
  */
 export function parseTimeDuration(text: string): { start: string | null; duration: Duration | null } {
   const t = norm(text);
   const PREFIX = String.raw`(?:as|das|a partir das|pras|para as|por volta das)\s*`;
-  let duration: Duration | null = null;
-  if (/\b(?:1h30|1:30 ?h|uma hora e meia|1 hora e meia|hora e meia|90 ?min(?:utos)?)\b/.test(t)) duration = 90;
-  else if (new RegExp(String.raw`(?<!${PREFIX})\b(?:2h|2 horas|duas horas|120 ?min(?:utos)?)\b`).test(t) && !new RegExp(String.raw`\b${PREFIX}2h\b`).test(t)) duration = 120;
-  else if (/\b(?:1h|1 hora|uma hora|60 ?min(?:utos)?)\b/.test(t) && !new RegExp(String.raw`\b${PREFIX}1h\b`).test(t)) duration = 60;
+  const prefixed = (index: number) => new RegExp(String.raw`\b${PREFIX}$`).test(t.slice(0, index));
+  const N = String.raw`(\d|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito)`;
+  const find = (pattern: string, minutes: (m: RegExpExecArray) => number) => {
+    for (const m of t.matchAll(new RegExp(pattern, 'g'))) if (!prefixed(m.index)) { const value = minutes(m); if (value >= 60 && value <= 480) return value; }
+    return null;
+  };
+  const duration: Duration | null =
+    find(String.raw`\b${N}\s*(?:h|horas?)\s*e\s*meia\b`, (m) => count(m[1]!) * 60 + 30)
+    ?? find(String.raw`(?<!\d\s*)\bhora e meia\b`, () => 90)
+    ?? find(String.raw`\b([1-8])(?:h|:)30\b(?!\s*min)`, (m) => Number(m[1]) * 60 + 30)
+    ?? find(String.raw`\b(\d{2,3}) ?min(?:utos)?\b`, (m) => (Number(m[1]) % 30 ? 0 : Number(m[1])))
+    ?? find(String.raw`\b${N}\s*horas?\b`, (m) => count(m[1]!) * 60)
+    ?? find(String.raw`\b([1-4])h\b(?!\d)`, (m) => Number(m[1]) * 60);
   const valid = (h: number, m: number) => h >= 0 && h <= 23 && m >= 0 && m <= 59;
   let start: string | null = null;
   const withPrefix = t.match(new RegExp(String.raw`\b${PREFIX}(\d{1,2})(?:[:h](\d{2}))?\s*h?\b`));

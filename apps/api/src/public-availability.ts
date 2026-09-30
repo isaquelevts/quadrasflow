@@ -1,9 +1,9 @@
 // Horários livres da página pública (sem banco, para poder testar isolado). Minutos desde 00:00.
 
 export type Busy = { start: number; end: number };
-export const STEP = 30;
-export const MIN_DURATION = 60;
-export const MAX_DURATION = 480;
+import { DEFAULT_MAX_DURATION as MAX_DURATION, MIN_DURATION, STEP } from './booking-duration.js';
+
+export { MAX_DURATION, MIN_DURATION, STEP };
 
 const free = (from: number, to: number, busy: readonly Busy[]) => !busy.some((b) => b.start < to && b.end > from);
 
