@@ -9,9 +9,9 @@ import { db } from './database.js';
 import { bookingAmountCents } from './pricing.js';
 import { createBookingPixCharge, linkChargeCents, PIX_MINUTES } from './mercadopago.js';
 import { botPaused, DEFAULT_OUTSIDE_HOURS_MESSAGE, isOutsideHumanHours, LEGACY_OUTSIDE_HOURS_MESSAGE, outsideHoursText, wantsHuman } from './whatsapp-handoff-rules.js';
-import { confirmPendingBooking, listFreeCourts, prepareBookingSummary, priceReply, runWhatsAppAgent, type AgentDeps, type PendingBooking } from './whatsapp-agent.js';
+import { confirmPendingBooking, dayScheduleReply, listFreeCourts, prepareBookingSummary, priceReply, runWhatsAppAgent, type AgentDeps, type PendingBooking } from './whatsapp-agent.js';
 import { durationLabel, parseTimeDuration, type Duration } from './whatsapp-court-search.js';
-import { DATE_QUESTION, NAME_QUESTION, askDurationText, isGreeting, isPriceQuestion, isReserveIntent, matchCourt, parseBareTime, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
+import { DATE_QUESTION, NAME_QUESTION, askDurationText, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
 import { durationChoices, durationError, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { confirmsSummary } from './whatsapp-confirm.js';
 import { isSimulating, runSimulation, simulationNote, simulatorPhone, SIMULATOR_PREFIX } from './whatsapp-simulation.js';
@@ -182,6 +182,8 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  if(aiConfigured()&&!pending){
   const fixed=await (async():Promise<string|undefined>=>{
    if(isGreeting(message)&&!context.confirmedDate){context.menu=true;return welcomeMenu(company.name,bot.welcome);}
+   // Dia já escolhido e o cliente pede para ver os horários (ou só "e à noite?"): horários por quadra primeiro.
+   if(context.confirmedDate&&(isPeriodOnly(message)||(isTimesQuestion(message)&&!saysDate(message))))return dayScheduleReply(agentDeps,company.id,context,String(context.confirmedDate),parsePeriod(message));
    if(menuChoice==='1'&&!context.confirmedDate)return DATE_QUESTION;
    if(isReserveIntent(message)&&!context.confirmedDate)return DATE_QUESTION;
    if(isPriceQuestion(message)){context.priceAsked=true;return priceReply(company.id,context.confirmedDate?String(context.confirmedDate):undefined);}
@@ -237,6 +239,12 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   if(free.slots.some(x=>x.inicio===timePick)){await reply_(await proceedToBooking(court,day,timePick,minutes));return;}
   const now=localNow(bot.timeZone,receivedAt);
   await reply_(`${timeUnavailableText(timePick,day===now.date&&timePick<=now.time?'passou':'ocupado')}\n\n${await availableTimesReply(company.id,court.id,day,minutes)}`);return;
+ }
+ //    Depois de "horários livres: 20:00 · 20:30", o cliente responde só com um deles ("20", "às 20h"): lista as quadras livres naquele horário.
+ const suggested=Array.isArray(context.suggested)?(context.suggested as unknown[]).map(String):[],suggestedPick=parseBareTime(message);
+ if(aiConfigured()&&!context.pendingBooking&&!context.selectedCourtId&&context.confirmedDate&&suggestedPick&&suggested.includes(suggestedPick)){
+  const prev=context.search as {duration?:Duration|null}|undefined,found=await listFreeCourts(agentDeps,company.id,context,String(context.confirmedDate),suggestedPick,prev?.duration??null);
+  await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,found.message);return;
  }
  // 3) com a data já escolhida e ainda sem quadra, horário e/ou duração na mensagem: lista as quadras livres.
  const asked=parseTimeDuration(message),mentionsDate=/\b(hoje|amanh[ãa]|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|dia \d)|\d{1,2}\/\d{1,2}/i.test(message);

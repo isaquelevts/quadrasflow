@@ -20,7 +20,7 @@ import { unsupportedClaim } from './whatsapp-agent-claims.js';
 import { freeCourtsMessage, parseTimeDuration, searchFreeCourts, type Duration } from './whatsapp-court-search.js';
 import { dateSaidByClient } from './whatsapp-date-guard.js';
 import { durationLabel, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
-import { DATE_QUESTION, priceMessage } from './whatsapp-flow.js';
+import { DATE_QUESTION, dayScheduleMessage, isPeriodOnly, isTimesQuestion, noCourtsMessage, parsePeriod, periodOf, priceMessage, type Period } from './whatsapp-flow.js';
 import { isOutsideHumanHours, outsideHoursText, type HumanHours } from './whatsapp-handoff-rules.js';
 
 export type PendingBooking = { courtId: string; courtName: string; date: string; startTime: string; durationMinutes: number; customerName: string; customerEmail?: string; amountCents: number; createdAt: string };
@@ -118,7 +118,7 @@ Hoje é ${displayDate(now.date)}. Amanhã será ${displayDate(tomorrow.toISOStri
 # Fluxo da reserva (siga nesta ordem; uma pergunta por vez; aproveite tudo o que o cliente já disse)
 1. Se o cliente escolher reservar sem dizer a data, chame perguntar_data: o sistema envia a pergunta do dia. Não escreva nada além disso, nem explique formatos de data.
 2. Data: chame interpretar_data com a expressão que o cliente escreveu. Nunca presuma a data.
-3. Depois de interpretar_data, o sistema já envia a pergunta de horário e duração ou, se o cliente já disse horário ou duração, a lista numerada de quadras livres. Não acrescente nada.
+3. Depois de interpretar_data, o sistema já envia a pergunta de horário e duração, os horários livres por quadra (se o cliente pediu para ver os horários ou um período como "à noite") ou, se o cliente já disse horário ou duração, a lista numerada de quadras livres. Não acrescente nada.
 4. Se o cliente mudar o horário ou a duração, chame consultar_quadras_livres com o que ele disse (null no que não disse). O sistema envia a lista numerada.
 5. Quando o cliente escolher a quadra (número ou nome da lista): se já souber horário e duração, vá ao passo 6; senão chame consultar_horarios dessa quadra (pergunte antes a duração se ainda não souber). O sistema envia os horários.
 6. Nome: use o nome salvo; se não houver, pergunte e salve com salvar_contato.
@@ -187,13 +187,56 @@ export async function listFreeCourts(deps: AgentDeps, companyId: string, context
   }
   const list = await searchFreeCourts(active, day, start, duration, (courtId, date, minutes) => deps.availability(companyId, courtId, date, minutes), maxDuration);
   clearSearch(context);
+  if (!list.length && (start || duration)) return { message: await noCourtsReply(deps, companyId, context, active, day, start, duration), list };
   context.confirmedDate = day; context.search = { date: day, start, duration }; context.courtOptions = list.map((c) => c.id);
   return { message: freeCourtsMessage(displayDate(day), start, duration, list), list };
 }
 
+type ActiveCourt = { id: string; name: string; sport: string };
+/** Inícios livres de cada quadra no dia, para a duração dada (já sem horários que passaram hoje) e, se houver, só do período. */
+async function courtTimes(deps: AgentDeps, companyId: string, active: readonly ActiveCourt[], day: string, minutes: number, period: Period | null) {
+  const rows = await Promise.all(active.map(async (court) => {
+    const free = await deps.availability(companyId, court.id, day, minutes);
+    return { open: free.open, name: court.name, sport: court.sport, times: free.slots.map((x) => x.inicio).filter((t) => !period || periodOf(t) === period) };
+  }));
+  return { rows, open: rows.some((r) => r.open), union: [...new Set(rows.flatMap((r) => r.times))].sort() };
+}
+
+/**
+ * Nenhuma quadra livre no horário (ou duração) pedido: diz o motivo e mostra os horários livres do dia.
+ * Sem horários na duração pedida, mostra os de 1h com o aviso. O cliente responde com um deles.
+ */
+async function noCourtsReply(deps: AgentDeps, companyId: string, context: Record<string, unknown>, active: readonly ActiveCourt[], day: string, start: string | null, duration: number | null) {
+  const now = localNow((await deps.botConfig(companyId)).timeZone || 'America/Belem', new Date());
+  const reason = start ? (day === now.date && start <= now.time ? 'passou' as const : 'ocupado' as const) : null;
+  let minutes = duration ?? 60, notice: string | undefined;
+  let found = await courtTimes(deps, companyId, active, day, minutes, null);
+  if (found.open && !found.union.length && minutes > 60) {
+    minutes = 60; found = await courtTimes(deps, companyId, active, day, minutes, null);
+    if (found.union.length) notice = `Para ${durationLabel(duration!)} não tem, mas para 1h tem:`;
+  }
+  context.confirmedDate = day; context.suggested = found.union;
+  context.search = { date: day, start: null, duration: notice ? null : duration };
+  return noCourtsMessage({ start, reason, durationText: duration && duration !== 60 ? durationLabel(duration) : null, today: day === now.date, times: found.union, notice, closed: !found.open });
+}
+
+/** O cliente pediu para ver os horários do dia (ou de um período): o sistema envia por quadra, com o esporte, e depois pergunta. */
+export async function dayScheduleReply(deps: AgentDeps, companyId: string, context: Record<string, unknown>, day: string, period: Period | null, duration: number | null = null) {
+  const [active, company] = await Promise.all([
+    db.select({ id: courts.id, name: courts.name, sport: courts.sport }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))).orderBy(asc(courts.name)),
+    db.select({ publicOptions: companies.publicOptions }).from(companies).where(eq(companies.id, companyId)).limit(1).then((r) => r[0]),
+  ]);
+  const minutes = duration && validDuration(duration, maxDurationOf(company?.publicOptions)) ? duration : 60;
+  const found = await courtTimes(deps, companyId, active, day, minutes, period);
+  context.confirmedDate = day; context.suggested = found.union;
+  context.search = { date: day, start: null, duration: minutes === 60 && !duration ? null : minutes };
+  if (!found.open) return `A arena está fechada em ${displayDate(day)}. Qual outro dia você prefere?`;
+  return dayScheduleMessage({ dayLabel: displayDate(day), period, durationText: minutes !== 60 ? durationLabel(minutes) : null, courts: found.rows });
+}
+
 /** Esquece a busca anterior (data, quadra escolhida, lista) para não arrastar escolhas antigas. */
 function clearSearch(context: Record<string, unknown>) {
-  for (const key of ['search', 'courtOptions', 'selectedCourtId', 'selectedCourtName', 'pendingBooking', 'awaitingEmail', 'awaitingTimeChoice', 'awaitingCourtChoice', 'intervalStage', 'intervalReservation', 'pendingDate', 'confirmedInterval', 'timesShown', 'chosen', 'priceAsked', 'menu']) delete context[key];
+  for (const key of ['search', 'courtOptions', 'selectedCourtId', 'selectedCourtName', 'pendingBooking', 'awaitingEmail', 'awaitingTimeChoice', 'awaitingCourtChoice', 'intervalStage', 'intervalReservation', 'pendingDate', 'confirmedInterval', 'timesShown', 'chosen', 'priceAsked', 'menu', 'suggested']) delete context[key];
 }
 /** Quadra pelo número da última lista enviada ou pelo nome. */
 async function pickCourt(deps: AgentDeps, turn: Turn, value: string) {
@@ -328,6 +371,13 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
           const found = await listFreeCourts(deps, turn.companyId, turn.context, parsed.date, asked.start, asked.duration);
           turn.availabilityReply = found.message;
           return { ok: true, data: parsed.date, quadras_livres: found.list.length };
+        }
+        // "Quais horários tem amanhã à noite?": primeiro os horários (por quadra), depois a pergunta.
+        const period = parsePeriod(turn.message);
+        if (period || isTimesQuestion(turn.message)) {
+          turn.availabilityReply = await dayScheduleReply(deps, turn.companyId, turn.context, parsed.date, period);
+          turn.facts.availabilityChecked = true;
+          return { ok: true, data: parsed.date, horarios_enviados: true };
         }
         turn.availabilityReply = askTimeAndDuration(parsed.date);
         return { ok: true, data: parsed.date, apresentacao: displayDate(parsed.date) };

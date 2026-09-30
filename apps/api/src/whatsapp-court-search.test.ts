@@ -48,10 +48,11 @@ test('lê horário e duração do jeito que o cliente escreve', () => {
   const cases: Array<[string, string | null, number | null]> = [
     ['às 21h, 1 hora', '21:00', 60], ['21:00 por 1h', '21:00', 60], ['1 hora', null, 60], ['1 hora mesmo', null, 60], ['uma hora e meia', null, 90],
     ['1h30', null, 90], ['2 horas', null, 120], ['2h', null, 120], ['às 20h', '20:00', null], ['tem quadra livre amanhã às 19h?', '19:00', null],
-    ['quero reservar amanhã às 20h por 1h30', '20:00', 90], ['19h30', '19:30', null], ['das 18:30 às 20:00', '18:30', null], ['às 2h', '02:00', null],
+    ['quero reservar amanhã às 20h por 1h30', '20:00', 90], ['19h30', '19:30', null], ['das 18:30 às 20:00', '18:30', 90], ['às 2h', '02:00', null],
     ['quero reservar para hoje', null, null], ['Carlos Silva', null, null], ['1', null, null], ['pode ser 22:00', '22:00', null],
     ['3 horas', null, 180], ['3h', null, 180], ['2h30', null, 150], ['duas horas e meia', null, 150], ['por 4h', null, 240], ['150 minutos', null, 150],
-    ['às 19h por 3 horas', '19:00', 180], ['das 18h às 21h', '18:00', null], ['8 horas', null, 480], ['às 3h', '03:00', null], ['2 horas e meia', null, 150],
+    ['às 19h por 3 horas', '19:00', 180], ['das 18h às 21h', '18:00', 180],
+    ['Quero reservar hoje das 19h às 20h', '19:00', 60], ['de 19h até 20h30', '19:00', 90], ['das 19 às 21', '19:00', 120], ['das 22 às 2', '22:00', null], ['das 19h às 19h30', '19:00', null], ['das 08:00 às 17:00', '08:00', 540 > 480 ? null : 540], ['8 horas', null, 480], ['às 3h', '03:00', null], ['2 horas e meia', null, 150],
   ];
   for (const [text, start, duration] of cases) assert.deepEqual(parseTimeDuration(text), { start, duration }, text);
 });

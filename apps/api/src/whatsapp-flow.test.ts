@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { askDurationText, courtPriceRange, isGreeting, isPriceQuestion, isReserveIntent, matchCourt, parseBareTime, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
+import { askDurationText, courtPriceRange, dayScheduleMessage, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, noCourtsMessage, parseBareTime, parsePeriod, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
 
 test('horário solto depois da lista', () => {
   const cases: Array<[string, string | null]> = [['20', '20:00'], ['20h', '20:00'], ['às 20', '20:00'], ['as 17', '17:00'], ['20:30', '20:30'], ['20h30', '20:30'], ['21 horas', '21:00'], ['pode ser 20', null],
@@ -45,4 +45,38 @@ test('preço: valor único, faixa e dia específico', () => {
   assert.equal(priceMessage(two, flat, days), '💰 Valores:\n\n• Areia 1 · Vôlei — R$ 100 por hora\n• Society 1 · Society — R$ 100 por hora\n\nQuer agendar um horário? 📅');
   assert.match(priceMessage(two, tariffs, days), /Areia 1 · Vôlei — varia de R\$ 100 a R\$ 150 por hora \(depende do dia e do horário\)/);
   assert.match(priceMessage(two, tariffs, days, 'quarta-feira, 30/09/2026', 3), /Valores em quarta-feira, 30\/09\/2026:[\s\S]*R\$ 100 por hora/);
+});
+
+test('período do dia e pedido de horários', () => {
+  const cases: Array<[string, string | null]> = [['Quais horários vocês têm amanhã à noite?', 'noite'], ['de manhã', 'manha'], ['hoje à tarde', 'tarde'], ['Boa noite, quero reservar amanhã', null], ['boa tarde', null], ['e de noite?', 'noite']];
+  for (const [text, expected] of cases) assert.equal(parsePeriod(text), expected, text);
+  for (const t of ['Quais horários vocês têm amanhã à noite?', 'quais horários tem hoje?', 'tem horário livre amanhã?', 'que horas tem sábado', 'tem quadra livre hoje?', 'horários disponíveis amanhã']) assert.equal(isTimesQuestion(t), true, t);
+  for (const t of ['tem horario as 19 hoje', 'quero reservar amanhã', 'qual o status da minha reserva?', 'quanto custa', 'oi', 'quero jogar às 20h']) assert.equal(isTimesQuestion(t), false, t);
+  assert.equal(isPeriodOnly('e à noite?'), true); assert.equal(isPeriodOnly('de manhã'), true); assert.equal(isPeriodOnly('quero reservar amanhã à noite com meus amigos do trabalho'), false);
+});
+
+test('sem quadra no horário: motivo correto e só os horários livres', () => {
+  assert.equal(noCourtsMessage({ start: '19:00', reason: 'passou', durationText: null, today: true, times: ['20:00', '20:30', '21:00'] }), 'Às 19:00 já passou 😅\n\n🕒 20:00 · 20:30 · 21:00\n\nQual deles você prefere?');
+  assert.equal(noCourtsMessage({ start: '19:00', reason: 'ocupado', durationText: null, today: false, times: ['20:00'] }), 'Às 19:00 não tem quadra livre 😕\n\n🕒 20:00\n\nQual deles você prefere?');
+  assert.match(noCourtsMessage({ start: '19:00', reason: 'ocupado', durationText: '2h', today: false, times: ['20:00'] }), /^Às 19:00 não tem quadra livre para 2h 😕/);
+  assert.match(noCourtsMessage({ start: null, reason: null, durationText: '2h', today: false, times: ['10:00'], notice: 'Para 2h não tem, mas para 1h tem:' }), /^Não tem quadra livre para 2h nesse dia 😕\nPara 2h não tem, mas para 1h tem:\n\n🕒 10:00/);
+  assert.match(noCourtsMessage({ start: '19:00', reason: 'passou', durationText: null, today: true, times: [] }), /Hoje já não tem mais horário livre\. Quer ver amanhã ou outro dia\? 📅$/);
+  assert.match(noCourtsMessage({ start: '19:00', reason: 'ocupado', durationText: null, today: false, times: [] }), /Nesse dia não tem mais horário livre\. Quer tentar outro dia\? 📅$/);
+  assert.match(noCourtsMessage({ start: '19:00', reason: 'ocupado', durationText: null, today: false, times: [], closed: true }), /^Nesse dia a arena está fechada/);
+  const many = Array.from({ length: 20 }, (_, i) => `${String(8 + Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`);
+  const msg = noCourtsMessage({ start: '12:00', reason: 'ocupado', durationText: null, today: false, times: many });
+  assert.ok(msg.includes('🕒 12:00 · 12:30') && msg.split(' · ').length === 12, 'mostra os 12 a partir do pedido');
+  const late = noCourtsMessage({ start: '17:00', reason: 'ocupado', durationText: null, today: false, times: [...many, '22:00'] });
+  assert.ok(late.includes('22:00') && late.split(' · ').length === 12 && late.includes('17:00'), 'pedido perto do fim: completa com os anteriores');
+});
+
+test('horários do dia por quadra, com o esporte', () => {
+  const courts = [{ name: 'Areia 1', sport: 'Vôlei', times: ['18:00', '19:00'] }, { name: 'Society 1', sport: 'Society', times: ['19:00', '19:30', '20:30'] }, { name: 'Society 2', sport: 'Society', times: [] }];
+  assert.equal(dayScheduleMessage({ dayLabel: 'quinta-feira, 01/10/2026', period: 'noite', durationText: null, courts }),
+    '📅 quinta-feira, 01/10/2026. Horários livres à noite:\n\n🏟️ Areia 1 · Vôlei\n🕒 18:00 · 19:00\n\n🏟️ Society 1 · Society\n🕒 19:00 · 19:30 · 20:30\n\n🏟️ Society 2 · Society — sem horários livres à noite\n\nQue horas você quer jogar e por quanto tempo? 🙂');
+  assert.match(dayScheduleMessage({ dayLabel: 'x', period: null, durationText: '1h30', courts: courts.slice(0, 1) }), /Horários livres para 1h30:/);
+  assert.match(dayScheduleMessage({ dayLabel: 'x', period: 'manha', durationText: null, courts: courts.map((c) => ({ ...c, times: [] })) }), /Não tenho horários livres de manhã nesse dia\. Quer ver outro período ou outro dia\?/);
+  const eight = Array.from({ length: 8 }, (_, i) => ({ name: `Q${i + 1}`, sport: 'Society', times: Array.from({ length: 8 - i }, (_, k) => `1${k}:00`) }));
+  const big = dayScheduleMessage({ dayLabel: 'x', period: null, durationText: null, courts: eight });
+  assert.ok(big.includes('Q1 ·') && big.includes('Q6 ·') && !big.includes('Q7 ·') && big.includes('Tem mais 2 quadras com horários livres'), big);
 });

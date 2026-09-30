@@ -104,3 +104,50 @@ export function priceMessage(courts: readonly PriceCourt[], tariffs: readonly Ta
   });
   return `💰 ${dayLabel ? `Valores em ${dayLabel}` : 'Valores'}:\n\n${lines.join('\n')}\n\nQuer agendar um horário? 📅`;
 }
+
+export type Period = 'manha' | 'tarde' | 'noite';
+const PERIOD_LABEL: Record<Period, string> = { manha: 'de manhã', tarde: 'à tarde', noite: 'à noite' };
+export const periodOf = (hhmm: string): Period => (hhmm < '12:00' ? 'manha' : hhmm < '18:00' ? 'tarde' : 'noite');
+/** "amanhã à noite", "de manhã", "à tarde"; "boa noite" é cumprimento, não período. */
+export function parsePeriod(text: string): Period | null {
+  const t = norm(text).replace(/\b(?:bom dia|boa tarde|boa noite)\b/g, ' ');
+  if (/\bmanha\b/.test(t)) return 'manha';
+  if (/\btarde\b/.test(t)) return 'tarde';
+  if (/\b(?:noite|noitinha)\b/.test(t)) return 'noite';
+  return null;
+}
+/** Pedido de ver os horários ("quais horários vocês têm amanhã?"), sem um horário específico. */
+export const isTimesQuestion = (text: string) => {
+  const t = norm(text);
+  if (t.length > 120 || TIME_WORDS.test(t) || /\b(cancel|minha reserva|pix|pagamento)\b/.test(t)) return false;
+  return /\b(quais|qual|que)\b.*\b(horarios?|horas)\b/.test(t) || /\b(horarios?|vagas?|quadras?)\b.*\b(livres?|disponiveis|disponivel|vagos?)\b/.test(t) || /\btem\b.*\b(horarios?|vagas?)\b/.test(t) || /\bque horas\b/.test(t);
+};
+/** Só o período ("e à noite?", "de manhã"): pede outra faixa do mesmo dia. */
+export const isPeriodOnly = (text: string) => norm(text).length <= 25 && parsePeriod(text) !== null;
+
+const timesLine = (times: readonly string[]) => `🕒 ${times.join(' · ')}`;
+const MAX_TIMES = 12;
+
+/** Mensagem quando não há quadra livre no horário (ou duração) pedido: motivo + horários livres do dia. */
+export function noCourtsMessage(a: { start: string | null; reason: 'passou' | 'ocupado' | null; durationText: string | null; today: boolean; times: readonly string[]; notice?: string | undefined; closed?: boolean }) {
+  const first = a.start
+    ? a.reason === 'passou' ? `Às ${a.start} já passou 😅` : `Às ${a.start} não tem quadra livre${a.durationText ? ` para ${a.durationText}` : ''} 😕`
+    : `Não tem quadra livre${a.durationText ? ` para ${a.durationText}` : ''} nesse dia 😕`;
+  if (a.closed) return 'Nesse dia a arena está fechada. Qual outro dia você prefere? 📅';
+  if (!a.times.length) return `${first}\n\n${a.today ? 'Hoje já não tem mais horário livre. Quer ver amanhã ou outro dia? 📅' : 'Nesse dia não tem mais horário livre. Quer tentar outro dia? 📅'}`;
+  // Com muitos horários, mostra os 12 mais próximos do pedido (a partir dele; se faltar, completa com os anteriores).
+  const idx = a.start ? a.times.findIndex((t) => t >= a.start!) : 0, at = idx < 0 ? a.times.length : idx;
+  const from = Math.min(at, Math.max(0, a.times.length - MAX_TIMES)), shown = a.times.slice(from, from + MAX_TIMES);
+  return `${first}\n${a.notice ? `${a.notice}\n` : ''}\n${timesLine(shown)}\n\nQual deles você prefere?`;
+}
+
+/** Horários livres por quadra (com o esporte), quando o cliente pede para ver os horários do dia ou de um período. */
+export function dayScheduleMessage(a: { dayLabel: string; period: Period | null; durationText: string | null; courts: ReadonlyArray<{ name: string; sport: string; times: readonly string[] }> }) {
+  const where = a.period ? ` ${PERIOD_LABEL[a.period]}` : '';
+  const withTimes = a.courts.filter((c) => c.times.length).sort((x, y) => y.times.length - x.times.length);
+  if (!withTimes.length) return `📅 ${a.dayLabel}. Não tenho horários livres${where}${a.durationText ? ` para ${a.durationText}` : ''} nesse dia. Quer ver ${a.period ? 'outro período ou ' : ''}outro dia? 😊`;
+  const MAX_COURTS = 6, shown = new Set(withTimes.slice(0, MAX_COURTS));
+  const blocks = a.courts.filter((c) => !c.times.length || shown.has(c)).map((c) => c.times.length ? `🏟️ ${c.name} · ${c.sport}\n${timesLine(c.times)}` : `🏟️ ${c.name} · ${c.sport} — sem horários livres${where}`);
+  const more = withTimes.length - shown.size;
+  return `📅 ${a.dayLabel}. Horários livres${where}${a.durationText ? ` para ${a.durationText}` : ''}:\n\n${blocks.join('\n\n')}${more > 0 ? `\n\nTem mais ${more} ${more === 1 ? 'quadra' : 'quadras'} com horários livres; me diz o horário que eu mostro.` : ''}\n\nQue horas você quer jogar e por quanto tempo? 🙂`;
+}

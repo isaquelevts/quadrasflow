@@ -87,6 +87,15 @@ export function parseTimeDuration(text: string): { start: string | null; duratio
     ?? find(String.raw`\b(\d{2,3}) ?min(?:utos)?\b`, (m) => (Number(m[1]) % 30 ? 0 : Number(m[1])))
     ?? find(String.raw`\b${N}\s*horas?\b`, (m) => count(m[1]!) * 60)
     ?? find(String.raw`\b([1-4])h\b(?!\d)`, (m) => Number(m[1]) * 60);
+  // Intervalo escrito pelo cliente ("das 19h às 20h", "de 19h até 20h30", "das 19 às 21"): início e duração de uma vez.
+  const range = t.match(/\b(?:das?|de|entre)\s*(?:as\s*)?(\d{1,2})(?:(?::|h)(\d{2}))?\s*h?\s*(?:as|a|ate|e|-)\s*(?:as\s*)?(\d{1,2})(?:(?::|h)(\d{2}))?\s*h?\b/);
+  if (range) {
+    const from = Number(range[1]) * 60 + Number(range[2] || 0), to = Number(range[3]) * 60 + Number(range[4] || 0), span = to - from;
+    if (Number(range[1]) >= 5 && Number(range[1]) <= 23 && Number(range[3]) <= 24 && span >= 60 && span <= 480 && span % 30 === 0) {
+      const startText = `${String(Math.floor(from / 60)).padStart(2, '0')}:${String(from % 60).padStart(2, '0')}`;
+      return { start: startText, duration: duration ?? span };
+    }
+  }
   const valid = (h: number, m: number) => h >= 0 && h <= 23 && m >= 0 && m <= 59;
   let start: string | null = null;
   const withPrefix = t.match(new RegExp(String.raw`\b${PREFIX}(\d{1,2})(?:[:h](\d{2}))?\s*h?\b`));
