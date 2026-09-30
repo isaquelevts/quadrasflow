@@ -172,7 +172,7 @@ export async function confirmPendingBooking(deps: AgentDeps, input: { companyId:
 }
 
 /** Pergunta padrão depois da data (passo 3). */
-export const askTimeAndDuration = (day: string, maxDuration: number) => `📅 ${displayDate(day)}. Para listar somente as quadras livres, qual horário e duração você prefere${maxDuration <= 120 ? `: ${durationRangeText(maxDuration)}?` : `? Pode ser ${durationRangeText(maxDuration)} (ex.: 1h, 1h30 ou 2h).`}`;
+export const askTimeAndDuration = (day: string) => `📅 ${displayDate(day)}.\nQue horas você quer jogar e por quanto tempo? Por exemplo: "19h por 1h30" 🙂`;
 
 /** Busca as quadras livres, guarda a lista no contexto e devolve a mensagem numerada (passo 4). */
 export async function listFreeCourts(deps: AgentDeps, companyId: string, context: Record<string, unknown>, day: string, start: string | null, duration: Duration | null) {
@@ -329,7 +329,7 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
           turn.availabilityReply = found.message;
           return { ok: true, data: parsed.date, quadras_livres: found.list.length };
         }
-        turn.availabilityReply = askTimeAndDuration(parsed.date, turn.maxDuration);
+        turn.availabilityReply = askTimeAndDuration(parsed.date);
         return { ok: true, data: parsed.date, apresentacao: displayDate(parsed.date) };
       }),
     define('perguntar_data', 'Pergunta para qual dia o cliente quer reservar. Use quando ele quiser reservar e ainda não disse a data. O sistema envia a pergunta pronta; não escreva nada.', empty,
@@ -472,7 +472,7 @@ export async function runWhatsAppAgent(deps: AgentDeps, input: AgentTurnInput): 
       // Disponibilidade, preço e frases de robô não justificam chamar a equipe: o sistema responde com o texto certo.
       simulationNote('note', 'Guardrail bloqueou a resposta de novo; o sistema respondeu com o texto padrão.');
       if ((error.result.output.outputInfo as { kind?: string }).kind === 'preco') { turn.facts.pricesChecked = true; return priceReply(companyId, turn.context.confirmedDate ? String(turn.context.confirmedDate) : undefined); }
-      return turn.context.confirmedDate ? askTimeAndDuration(String(turn.context.confirmedDate), turn.maxDuration) : DATE_QUESTION;
+      return turn.context.confirmedDate ? askTimeAndDuration(String(turn.context.confirmedDate)) : DATE_QUESTION;
     }
     if (error instanceof OutputGuardrailTripwireTriggered || error instanceof MaxTurnsExceededError) {
       if (error instanceof OutputGuardrailTripwireTriggered) simulationNote('note', 'Guardrail bloqueou a resposta de novo; a equipe foi chamada.');
