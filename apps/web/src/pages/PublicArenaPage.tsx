@@ -254,12 +254,14 @@ function BookingPage({ slug }: { slug: string }) {
           <Step id="passo-inicio" n={3} title="Que horas começa?" done={start !== null ? `às ${hm(start)}` : ''} locked={!courtId} lockedText="Escolha o dia e a quadra primeiro.">
             <div className="space-y-4">
               {([['Manhã', Sunrise, 0, 720], ['Tarde', Sun, 720, 1080], ['Noite', Moon, 1080, 1440]] as const).map(([label, Icon, a, b]) => {
-                const starts = startsFor(courtId), slots: number[] = []; for (let t = Math.max(a, open); t < Math.min(b, close); t += STEP) slots.push(t);
+                // Só inícios que ainda podem acontecer (não passados e com 1h antes de fechar); riscado = ocupado.
+                const starts = startsFor(courtId), slots: number[] = []; for (let t = Math.max(a, open, notBefore); t < b && t + MIN_DURATION <= close; t += STEP) slots.push(t);
                 if (!slots.length) return null;
                 if (!slots.some((t) => starts.includes(t))) return <div key={label} className="flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground/60 uppercase"><Icon className="size-3.5" aria-hidden="true" />{label} · sem horários</div>;
                 return <div key={label}><div className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground uppercase"><Icon className="size-3.5" aria-hidden="true" />{label}</div>
                   <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">{slots.map((t) => { const ok = starts.includes(t), sel = start === t; return <button key={t} type="button" disabled={!ok} aria-pressed={sel} onClick={() => pickStart(t)} className={cn('h-11 rounded-xl border-2 text-[14px] font-semibold tabular-nums transition active:scale-95', sel ? 'border-brand-900 bg-brand-900 text-white shadow-md' : ok ? 'border-border bg-white hover:border-brand-500' : 'border-transparent bg-muted text-muted-foreground/40 line-through')}>{hm(t)}</button>; })}</div></div>;
               })}
+              {startsFor(courtId).length > 0 && <p className="text-[12px] text-muted-foreground">Horários <span className="line-through">riscados</span> já estão reservados.</p>}
             </div>
           </Step>
 
