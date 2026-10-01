@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useState, type ComponentType, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type ComponentType, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowLeft, Banknote, BellRing, Bot, Check, ChevronRight, CircleDollarSign, Clock, Copy, CreditCard, FileText, FlaskConical, Hand, Headset, Info, LoaderCircle, MessageCircle,
-  MessagesSquare, Pencil, Percent, Phone, Plus, QrCode, Send, Smartphone, Trash2, TriangleAlert, Workflow, X, type LucideProps,
+  MessagesSquare, Pencil, Percent, Phone, Plus, QrCode, Smartphone, Trash2, TriangleAlert, Workflow, X, type LucideProps,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { WhatsAppServices } from '@/components/WhatsAppServices';
 import { AgentSimulator } from '@/components/whatsapp/AgentSimulator';
+import { ConversationsPanel, type Conversation, type Message } from '@/components/whatsapp/ConversationsPanel';
 import { EmptyState, PageHeader, Panel } from '@/components/app/page';
 import { ResponsiveSheet } from '@/components/app/ResponsiveSheet';
 import { ToneBadge, type Tone } from '@/components/app/status';
@@ -28,8 +29,6 @@ import { cn } from '@/lib/utils';
 type Config = { session: string; enabled: boolean; status: string; connected: boolean; serviceConfigured: boolean; aiConfigured: boolean; webhookUrl: string };
 type PaymentMode = 'none' | 'full' | 'percent' | 'fixed';
 type BotConfig = { paymentMode: PaymentMode; paymentPercent: number; paymentFixedCents: number; timeZone: string; enabled: boolean; testMode: boolean; testPhones: string[]; welcome: string; handoffMessage: string; reactivateAfterHours: number; manualResumeOnly: boolean; humanStart: string; humanEnd: string; outsideHoursMessage: string; notifyPayment: boolean; remindUnpaid: boolean; menuOptions: { id: string; label: string; response: string }[]; aiConfigured?: boolean; aiModel?: string };
-type Conversation = { phone: string; step: string; updated_at: string; last_message: string; awaiting_team?: boolean };
-type Message = { direction: string; body: string; created_at: string };
 type Template = { id: string; title: string; category: string; body: string; active: boolean | number };
 type Tab = 'config' | 'services' | 'simulador' | 'conversas' | 'modelos';
 
@@ -108,8 +107,16 @@ export function WhatsAppPage() {
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
 
+  /** Atualização silenciosa (a cada 15 s): lista e conversa aberta, sem tela de carregamento. */
+  async function refreshConversations(open: string) {
+    try {
+      const list = await api<{ conversations: Conversation[] }>('/api/whatsapp/conversations'); setConversations(list.conversations);
+      if (open) setMessages((await api<{ messages: Message[] }>(`/api/whatsapp/conversations?phone=${encodeURIComponent(open)}`)).messages);
+    } catch { /* tenta de novo no próximo ciclo */ }
+  }
   async function selectConversation(value: string) {
     setPhone(value);
+    if (!value) { setMessages([]); return; }
     try { setMessages((await api<{ messages: Message[] }>(`/api/whatsapp/conversations?phone=${encodeURIComponent(value)}`)).messages); }
     catch (cause) { toast.error(errorMessage(cause)); }
   }
@@ -274,7 +281,7 @@ export function WhatsAppPage() {
       </div>}
 
       {tab === 'simulador' && editable && <AgentSimulator />}
-      {tab === 'conversas' && <Conversations conversations={conversations} phone={phone} messages={messages} onSelect={(value) => void selectConversation(value)} onChanged={() => { void load(); refreshCounts(); }} />}
+      {tab === 'conversas' && <ConversationsPanel conversations={conversations} phone={phone} messages={messages} onSelect={(value) => void selectConversation(value)} onRefresh={refreshConversations} onChanged={() => { void load(); refreshCounts(); }} />}
       {tab === 'modelos' && <Templates templates={templates} editable={editable} onEdit={setTemplateDraft} onRemove={setRemovingTemplate} onChanged={() => void load()} />}
     </>}
 
@@ -371,52 +378,6 @@ function Preview({ bot, arena }: { bot: BotConfig; arena: string }) {
         <div className={cn(bubble, 'rounded-tl-none')}><div className="break-words whitespace-pre-wrap">{bot.handoffMessage}</div><span className="-mb-0.5 block text-right text-[9.5px] text-gray-500">19:03</span></div>
       </> : <div className="mx-auto mt-6 w-fit rounded-md bg-white/80 px-2 py-1 text-[11px] text-gray-500">O bot está desligado — a equipe responde manualmente.</div>}
     </div>
-  </div>;
-}
-
-function Conversations({ conversations, phone, messages, onSelect, onChanged }: { conversations: Conversation[]; phone: string; messages: Message[]; onSelect: (phone: string) => void; onChanged: () => void }) {
-  const [reply, setReply] = useState('');
-  const [sending, setSending] = useState(false);
-  const current = useMemo(() => conversations.find((c) => c.phone === phone), [conversations, phone]);
-  async function send(event: FormEvent) {
-    event.preventDefault(); setSending(true);
-    try { await api('/api/whatsapp/reply', { method: 'POST', body: JSON.stringify({ phone, message: reply }) }); setReply(''); onSelect(phone); onChanged(); }
-    catch (cause) { toast.error(errorMessage(cause)); }
-    finally { setSending(false); }
-  }
-  async function resume() {
-    try { await api(`/api/whatsapp/conversations/${phone}/resume`, { method: 'PATCH', body: '{}' }); toast.success(current?.step === 'human' ? 'Automação retomada nesta conversa' : 'Pedido marcado como resolvido'); onChanged(); }
-    catch (cause) { toast.error(errorMessage(cause)); }
-  }
-  return <div className="grid grid-cols-1 gap-4 xl:grid-cols-[.8fr_1.2fr]">
-    <Panel className={cn(phone && 'hidden xl:block')}>
-      <div className="border-b px-4 py-4 lg:px-5"><h2 className="text-[15px] font-semibold">Conversas recentes</h2><p className="text-[12.5px] text-muted-foreground">As marcadas em âmbar estão com a equipe.</p></div>
-      {conversations.length ? <ul className="max-h-[560px] divide-y overflow-auto">{conversations.map((c) => <li key={c.phone}>
-        <button type="button" onClick={() => onSelect(c.phone)} className={cn('flex w-full items-start gap-3 px-4 py-3 text-left transition lg:px-5', phone === c.phone ? 'bg-brand-50/60' : 'hover:bg-muted/50')}>
-          <span className="grid size-9 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-700"><MessageCircle className="size-4" aria-hidden="true" /></span>
-          <span className="min-w-0 flex-1"><span className="flex items-center justify-between gap-2"><span className="font-medium tabular-nums">{formatPhone(c.phone)}</span><span className="text-[11px] text-muted-foreground">{new Date(c.updated_at).toLocaleDateString('pt-BR')}</span></span>
-            <span className="block truncate text-[12.5px] text-muted-foreground">{c.last_message || 'Sem mensagens'}</span>
-            {c.step === 'human' ? <ToneBadge tone="amber" className="mt-1.5">Atendimento humano</ToneBadge> : c.awaiting_team && <ToneBadge tone="blue" className="mt-1.5">Pediu atendente · bot ativo</ToneBadge>}</span>
-        </button></li>)}</ul> : <EmptyState icon={MessagesSquare} title="Nenhuma conversa ainda" text="Quando clientes escreverem para o número da arena, as conversas aparecem aqui." />}
-    </Panel>
-    <Panel className={cn(!phone && 'hidden xl:block')}>
-      {phone ? <>
-        <div className="flex items-center gap-2 border-b px-4 py-3 lg:px-5">
-          <Button variant="ghost" size="icon" className="xl:hidden" aria-label="Voltar para a lista" onClick={() => onSelect('')}><ArrowLeft /></Button>
-          <div className="min-w-0 flex-1"><h2 className="truncate text-[15px] font-semibold tabular-nums">{formatPhone(phone)}</h2>{current?.step === 'human' ? <p className="text-[12px] text-amber-700">Atendimento humano: o bot está pausado.</p> : current?.awaiting_team && <p className="text-[12px] text-blue-700">Pediu atendente fora do horário. O bot segue atendendo; responder aqui assume a conversa.</p>}</div>
-          {current?.step === 'human' ? <Button variant="outline" size="sm" onClick={() => void resume()}><Bot /> Retomar bot</Button> : current?.awaiting_team && <Button variant="outline" size="sm" onClick={() => void resume()}><Check /> Marcar como resolvido</Button>}
-        </div>
-        <div className="max-h-[440px] space-y-2 overflow-auto bg-[#efeae2] p-4" aria-live="polite">
-          {messages.length ? messages.map((m, i) => <div key={i} className={cn('w-fit max-w-[85%] rounded-lg px-3 py-2 text-[13px] shadow-sm', m.direction === 'out' ? 'ml-auto rounded-tr-none bg-[#d9fdd3]' : 'rounded-tl-none bg-white')}>
-            <div className="break-words whitespace-pre-wrap">{m.body}</div><span className="block text-right text-[10px] text-gray-500">{new Date(m.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
-          </div>) : <p className="py-10 text-center text-[13px] text-muted-foreground">Sem mensagens nesta conversa.</p>}
-        </div>
-        <form className="flex gap-2 border-t p-3" onSubmit={(event) => void send(event)}>
-          <Textarea aria-label="Mensagem" rows={2} maxLength={2000} value={reply} onChange={(e) => setReply(e.target.value)} placeholder="Digite sua resposta" />
-          <Button type="submit" size="icon" className="size-11 self-end" aria-label="Enviar" disabled={!reply.trim() || sending}>{sending ? <LoaderCircle className="animate-spin" /> : <Send />}</Button>
-        </form>
-      </> : <EmptyState icon={MessageCircle} title="Selecione uma conversa" text="Escolha uma conversa à esquerda para ver o histórico e responder." />}
-    </Panel>
   </div>;
 }
 
