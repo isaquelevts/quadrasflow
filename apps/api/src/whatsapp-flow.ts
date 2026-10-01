@@ -44,16 +44,16 @@ export function parseBareTime(text: string): string | null {
 }
 
 const ORDINALS: Record<string, number> = { primeira: 1, primeiro: 1, segunda: 2, segundo: 2, terceira: 3, terceiro: 3, quarta: 4, quarto: 4 };
-const FILLER = new Set(['a', 'o', 'as', 'os', 'na', 'no', 'da', 'do', 'de', 'pode', 'ser', 'quero', 'queria', 'prefiro', 'vou', 'fica', 'com', 'pela', 'pelo', 'por', 'favor', 'quadra', 'opcao', 'numero', 'pra', 'para', 'essa', 'esse', 'mesmo', 'mesma', 'vai', 'pf', 'pfv', 'entao', 'ta', 'ok', 'bom', 'bora']);
+const FILLER = new Set(['a', 'o', 'as', 'os', 'na', 'no', 'da', 'do', 'de', 'pode', 'ser', 'quero', 'queria', 'prefiro', 'vou', 'fica', 'com', 'pela', 'pelo', 'por', 'favor', 'quadra', 'opcao', 'numero', 'pra', 'para', 'essa', 'esse', 'mesmo', 'mesma', 'vai', 'pf', 'pfv', 'entao', 'ta', 'ok', 'bom', 'bora', 'hrs', 'hs', 'hora', 'horas', 'h', 'ate', 'das', 'dia']);
 /**
  * Quadra escolhida pelo cliente: número da lista ("2", "quadra 2", "opção 2"), ordinal ("a primeira") ou nome
  * ("pode ser a society 1", "a areia"). `courts` está na ordem da última lista enviada. Nome ambíguo devolve null.
  */
-export function matchCourt(text: string, courts: ReadonlyArray<{ id: string; name: string }>): string | null {
+export function matchCourt(text: string, courts: ReadonlyArray<{ id: string; name: string }>, allowNumber = true): string | null {
   const t = norm(text).replace(/[.!?,]+/g, ' ').replace(/\s+/g, ' ').trim();
-  const number = t.match(/^(?:quadra|opcao|numero)?\s*(\d{1,2})$/);
+  const number = allowNumber ? t.match(/^(?:quadra|opcao|numero)?\s*(\d{1,2})$/) : null;
   if (number) return courts[Number(number[1]) - 1]?.id ?? null;
-  const ordinal = t.match(/\b(primeira|primeiro|segunda|segundo|terceira|terceiro|quarta|quarto)\b(?:\s+(?:quadra|opcao))?$/);
+  const ordinal = allowNumber ? t.match(/\b(primeira|primeiro|segunda|segundo|terceira|terceiro|quarta|quarto)\b(?:\s+(?:quadra|opcao))?$/) : null;
   if (ordinal && t.split(' ').length <= 5 && ORDINALS[ordinal[1]!]! <= courts.length) return courts[ORDINALS[ordinal[1]!]! - 1]!.id;
   const names = courts.map((c) => ({ id: c.id, name: norm(c.name) }));
   const exact = names.filter((c) => new RegExp(`(?:^|\\s)${c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|\\s)`).test(t));
@@ -61,8 +61,11 @@ export function matchCourt(text: string, courts: ReadonlyArray<{ id: string; nam
     const longest = Math.max(...exact.map((c) => c.name.length)), best = exact.filter((c) => c.name.length === longest);
     return best.length === 1 ? best[0]!.id : null;
   }
-  const words = t.split(' ').filter((w) => w && !FILLER.has(w));
-  if (!words.length || words.length > 3) return null;
+  // Horário ou duração dito na mesma frase ("a areia às 20", "2 horas") não faz parte do nome da quadra.
+  const nameWords = new Set(names.flatMap((c) => c.name.split(' ')));
+  const words = t.split(' ').filter((w) => w && !FILLER.has(w) && !(/^\d{1,2}(?::\d{2})?(?:h|hs|hrs|horas?)?(?:\d{2})?$/.test(w) && !nameWords.has(w)));
+  // Só números não identificam uma quadra: sem lista numerada podem ser duração ou horário.
+  if (!words.some((w) => /\D/.test(w)) || words.length > 3) return null;
   const hits = names.filter((c) => words.every((w) => c.name.split(' ').includes(w)));
   return hits.length === 1 ? hits[0]!.id : null;
 }

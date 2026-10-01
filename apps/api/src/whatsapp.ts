@@ -1,7 +1,7 @@
 import {arenaInformation,serviceSettings,handoff,ownBookings,prepareCancellation,cancelOwnBooking,queueCourtPhotos} from './whatsapp-services.js';
 import {deliverOne} from './whatsapp-delivery-worker.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lt, ne, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import sharp from 'sharp';
 import { appAudit, blockedSlots, bookingEvents, bookings, clients, companies, companyHours, companyPriceSlots, courts, integrationSettings, messageTemplates, monthlyMembers, webhookEvents, whatsappConversations, whatsappMessages, whatsappDeliveries } from '@quadrasflow/database';
@@ -204,7 +204,7 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  //    Reconhece o número ou o nome ("pode ser a society 1") e segue sem repetir a lista de quadras.
  const proceedToBooking=async(court:{id:string;name:string},day:string,start:string,minutes:number):Promise<string>=>{
   delete context.timesShown;context.search={date:day,start,duration:minutes};context.selectedCourtId=court.id;context.selectedCourtName=court.name;
-  const unavailable=async()=>{context.timesShown=true;context.search={date:day,start:null,duration:minutes};return `${timeUnavailableText(start,'ocupado')}\n\n${await availableTimesReply(company.id,court.id,day,minutes)}`;};
+  const unavailable=async()=>{context.timesShown=true;context.search={date:day,start:null,duration:minutes};return `${timeUnavailableText(start,reasonFor(day,start))}\n\n${await availableTimesReply(company.id,court.id,day,minutes)}`;};
   const free=await availability(company.id,court.id,day,minutes);if(!free.slots.some(x=>x.inicio===start))return unavailable();
   context.chosen={courtId:court.id,courtName:court.name,date:day,start,minutes};
   const saved=(await db.select({name:clients.name}).from(clients).where(and(eq(clients.companyId,company.id),eq(clients.phone,phone))).limit(1))[0]?.name||'';
@@ -213,18 +213,28 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   return 'erro' in done?unavailable():done.reply;
  };
  const reply_=async(text:string)=>{await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,text);};
- const named=aiConfigured()&&!context.pendingBooking&&courtOptions.length&&search?.date?await db.select({id:courts.id,name:courts.name}).from(courts).where(and(eq(courts.companyId,company.id),inArray(courts.id,courtOptions))):[],
-  chosenId=named.length?matchCourt(message,courtOptions.map(id=>named.find(c=>c.id===id)).filter((c):c is {id:string;name:string}=>Boolean(c))):null;
- if(chosenId&&search?.date){
-  const court=named.find(c=>c.id===chosenId)!,day=search.date;context.selectedCourtId=court.id;context.selectedCourtName=court.name;
-  if(search.start&&search.duration){await reply_(await proceedToBooking(court,day,search.start,search.duration));return;}
-  if(search.duration){context.timesShown=true;await reply_(await availableTimesReply(company.id,court.id,day,search.duration));return;}
-  if(search.start){
-   // Se não cabe por X minutos, não cabe por mais: para na primeira duração que não cabe.
-   const fits:number[]=[];for(const minutes of durationChoices(await arenaMaxDuration(company.id))){const free=await availability(company.id,court.id,day,minutes);if(!free.slots.some(x=>x.inicio===search.start))break;fits.push(minutes);}
-   if(fits.length){await reply_(askDurationText(court.name,search.start,fits));return;}
-   context.timesShown=true;context.search={date:day,start:null,duration:60};await reply_(`${timeUnavailableText(search.start,'ocupado')}\n\n${await availableTimesReply(company.id,court.id,day,60)}`);return;
-  }
+ const reasonFor=(day:string,start:string)=>{const now=localNow(bot.timeZone,receivedAt);return day===now.date&&start<=now.time?'passou' as const:'ocupado' as const;};
+ /** Só o horário é conhecido: pergunta a duração (as que cabem naquela quadra) ou, se não cabe, mostra os horários livres dela. */
+ const askDuration=async(court:{id:string;name:string},day:string,start:string):Promise<string>=>{
+  // Se não cabe por X minutos, não cabe por mais: para na primeira duração que não cabe.
+  const fits:number[]=[];for(const minutes of durationChoices(await arenaMaxDuration(company.id))){const free=await availability(company.id,court.id,day,minutes);if(!free.slots.some(x=>x.inicio===start))break;fits.push(minutes);}
+  if(fits.length){delete context.timesShown;context.search={date:day,start,duration:null};return askDurationText(court.name,start,fits);}
+  context.timesShown=true;context.search={date:day,start:null,duration:60};return `${timeUnavailableText(start,reasonFor(day,start))}\n\n${await availableTimesReply(company.id,court.id,day,60)}`;
+ };
+ //    A quadra citada na própria frase ("pode ser areia 1 as 20 hrs") vale na hora, e o horário ou a duração ditos agora mandam sobre o que estava guardado.
+ //    Com uma quadra já escolhida, um horário ou duração novos continuam nela. Número solto só vale como quadra depois de uma lista numerada.
+ const askNow=parseTimeDuration(message),dayNow=String(search?.date??context.confirmedDate??'');
+ const allCourts=aiConfigured()&&!context.pendingBooking&&dayNow&&!saysDate(message)?await db.select({id:courts.id,name:courts.name}).from(courts).where(and(eq(courts.companyId,company.id),eq(courts.active,true))).orderBy(asc(courts.name)):[];
+ const ordered=courtOptions.length?courtOptions.map(id=>allCourts.find(c=>c.id===id)).filter((c):c is {id:string;name:string}=>Boolean(c)):allCourts;
+ const courtId=(allCourts.length?matchCourt(message,ordered,courtOptions.length>0):null)??(context.selectedCourtId&&(askNow.start||askNow.duration)?String(context.selectedCourtId):null),courtNow=courtId?allCourts.find(c=>c.id===courtId):undefined;
+ if(courtNow&&dayNow){
+  const maxDuration=await arenaMaxDuration(company.id),start=askNow.start??search?.start??null,duration=askNow.duration??search?.duration??null;
+  context.selectedCourtId=courtNow.id;context.selectedCourtName=courtNow.name;
+  if(duration&&!validDuration(duration,maxDuration)){await reply_(`${durationError(maxDuration)} Qual duração você prefere?`);return;}
+  if(start&&duration){await reply_(await proceedToBooking(courtNow,dayNow,start,duration));return;}
+  if(start){await reply_(await askDuration(courtNow,dayNow,start));return;}
+  context.timesShown=true;context.search={date:dayNow,start:null,duration};
+  await reply_(await availableTimesReply(company.id,courtNow.id,dayNow,duration??60));return;
  }
  //    Só faltava a duração: o cliente responde "1 hora" e o sistema segue para o nome ou o resumo.
  const answer=parseTimeDuration(message);
@@ -234,11 +244,13 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  }
  //    Horário escolhido da lista ("20", "às 20h"): o sistema confere na agenda antes de responder.
  const timePick=parseBareTime(message);
+ if(aiConfigured()&&!context.pendingBooking&&context.timesShown&&context.selectedCourtId&&search?.date&&!search.duration&&timePick){
+  await reply_(await askDuration({id:String(context.selectedCourtId),name:String(context.selectedCourtName||'')},search.date,timePick));return;
+ }
  if(aiConfigured()&&!context.pendingBooking&&context.timesShown&&context.selectedCourtId&&search?.date&&search.duration&&timePick){
   const court={id:String(context.selectedCourtId),name:String(context.selectedCourtName||'')},day=search.date,minutes=search.duration,free=await availability(company.id,court.id,day,minutes);
   if(free.slots.some(x=>x.inicio===timePick)){await reply_(await proceedToBooking(court,day,timePick,minutes));return;}
-  const now=localNow(bot.timeZone,receivedAt);
-  await reply_(`${timeUnavailableText(timePick,day===now.date&&timePick<=now.time?'passou':'ocupado')}\n\n${await availableTimesReply(company.id,court.id,day,minutes)}`);return;
+  await reply_(`${timeUnavailableText(timePick,reasonFor(day,timePick))}\n\n${await availableTimesReply(company.id,court.id,day,minutes)}`);return;
  }
  //    Depois de "horários livres: 20:00 · 20:30", o cliente responde só com um deles ("20", "às 20h"): lista as quadras livres naquele horário.
  const suggested=Array.isArray(context.suggested)?(context.suggested as unknown[]).map(String):[],suggestedPick=parseBareTime(message);

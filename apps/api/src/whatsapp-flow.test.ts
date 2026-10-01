@@ -15,6 +15,14 @@ test('quadra por número, ordinal ou nome', () => {
   for (const [text, expected] of cases) assert.equal(matchCourt(text, courts), expected, text);
 });
 
+test('quadra citada junto com horário e duração', () => {
+  const cases: Array<[string, string | null]> = [['Pode ser areia 1 as 20 hrs', 'a'], ['society 2 às 21h por 1h30', 's2'], ['quero a areia as 20', 'a'], ['Society 1 às 19h', 's1'], ['areia 1 por 2 horas', 'a'], ['pode ser a society 2 as 20:30', 's2'],
+    ['society às 21h', null], ['às 20 hrs', null], ['20h por 2 horas', null]];
+  for (const [text, expected] of cases) assert.equal(matchCourt(text, courts, false), expected, text);
+  assert.equal(matchCourt('2', courts, false), null, 'número solto sem lista numerada não é quadra');
+  assert.equal(matchCourt('quadra 3', courts, false), null);
+  assert.equal(matchCourt('2', courts, true), 's1', 'com lista numerada continua valendo');
+});
 test('intenções claras', () => {
   for (const t of ['quero reservar', 'Reservar', 'quero marcar uma quadra', 'queria agendar', 'tem quadra livre?', 'tem horário?', 'quero fazer uma reserva', 'gostaria de alugar a quadra']) assert.equal(isReserveIntent(t), true, t);
   for (const t of ['quero reservar amanhã', 'quero reservar às 19h', 'reservar dia 5', 'quero cancelar minha reserva', 'quanto custa reservar?', 'oi', 'tem horario as 19 hoje', 'qual o status da minha reserva?', 'tenho uma reserva, já paguei o pix', 'queria remarcar', 'minha reserva foi confirmada?']) assert.equal(isReserveIntent(t), false, t);
