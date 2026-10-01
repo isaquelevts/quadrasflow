@@ -154,3 +154,31 @@ export function dayScheduleMessage(a: { dayLabel: string; period: Period | null;
   const more = withTimes.length - shown.size;
   return `📅 ${a.dayLabel}. Horários livres${where}${a.durationText ? ` para ${a.durationText}` : ''}:\n\n${blocks.join('\n\n')}${more > 0 ? `\n\nTem mais ${more} ${more === 1 ? 'quadra' : 'quadras'} com horários livres; me diz o horário que eu mostro.` : ''}\n\nQue horas você quer jogar e por quanto tempo? 🙂`;
 }
+
+/** Pedido de fotos ("me mande fotos das quadras", "tem imagem?", "quero ver a quadra"). */
+export const isPhotoRequest = (text: string) => {
+  const t = norm(text);
+  if (t.length > 140 || /\b(comprovante|pix|pagamento|paguei)\b/.test(t)) return false;
+  return /\b(fotos?|fotinhas?|imagens?)\b/.test(t) || /\b(quero|queria|posso|pode|da pra|dá pra) (?:eu )?(?:ver|conhecer)\b.*\b(quadras?|arena)\b/.test(t) || /\bcomo (?:e|sao|ficam?) (?:a|as|o|os) (?:quadras?|arena)\b/.test(t);
+};
+/** "todas", "das 3", "as três", "de todas as quadras": o cliente quer as fotos de todas as quadras. */
+export function isAllCourts(text: string, count: number) {
+  const t = norm(text).replace(/[.!?,]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (/\b(todas|todos|tudo|todinhas)\b/.test(t)) return true;
+  const words: Record<string, number> = { duas: 2, dois: 2, tres: 3, quatro: 4, cinco: 5, seis: 6 };
+  const m = t.match(/\b(?:das|as|de|nas|com as)\s+(\d{1,2}|duas|dois|tres|quatro|cinco|seis)(?:\s+quadras?)?$/);
+  if (!m) return false;
+  const n = words[m[1]!] ?? Number(m[1]);
+  return count > 1 && n === count;
+}
+/** Pergunta fixa quando o cliente pede fotos sem dizer de qual quadra. */
+export const photoQuestion = (names: readonly string[]) => `Claro! De qual quadra você quer ver as fotos? ${joinOu([...names])}? Se preferir, mando de todas. 📸`;
+/** Texto depois do envio (ou da falha): o sistema sempre fecha a conversa, sem laço de perguntas. */
+export function photosOutcome(a: { sent: number; failed: number; without: readonly string[] }): { text: string; handoff: boolean } {
+  const names = a.without.join(', ').replace(/, ([^,]*)$/, ' e $1');
+  const missing = a.without.length ? `${names} ainda ${a.without.length === 1 ? 'não tem' : 'não têm'} fotos cadastradas.` : '';
+  if (a.failed > 0 && a.sent === 0) return { text: 'Não consegui enviar as fotos agora. Deixei um recado para a equipe te ajudar. 🙏', handoff: true };
+  if (a.failed > 0) return { text: 'Enviei parte das fotos, mas não consegui enviar todas. Deixei um recado para a equipe completar. 🙏', handoff: true };
+  if (a.sent === 0) return { text: `${missing || 'Ainda não tenho fotos dessa quadra.'}\n\nQuer agendar um horário? 📅`, handoff: false };
+  return { text: `${missing ? `${missing}\n\n` : ''}Quer agendar um horário? 📅`, handoff: false };
+}

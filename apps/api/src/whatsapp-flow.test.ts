@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { askDurationText, courtPriceRange, dayScheduleMessage, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, noCourtsMessage, parseBareTime, parsePeriod, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
+import { isAllCourts, isPhotoRequest, photoQuestion, photosOutcome, askDurationText, courtPriceRange, dayScheduleMessage, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, noCourtsMessage, parseBareTime, parsePeriod, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
 
 test('horário solto depois da lista', () => {
   const cases: Array<[string, string | null]> = [['20', '20:00'], ['20h', '20:00'], ['às 20', '20:00'], ['as 17', '17:00'], ['20:30', '20:30'], ['20h30', '20:30'], ['21 horas', '21:00'], ['pode ser 20', null],
@@ -87,4 +87,21 @@ test('horários do dia por quadra, com o esporte', () => {
   const eight = Array.from({ length: 8 }, (_, i) => ({ name: `Q${i + 1}`, sport: 'Society', times: Array.from({ length: 8 - i }, (_, k) => `1${k}:00`) }));
   const big = dayScheduleMessage({ dayLabel: 'x', period: null, durationText: null, courts: eight });
   assert.ok(big.includes('Q1 ·') && big.includes('Q6 ·') && !big.includes('Q7 ·') && big.includes('Tem mais 2 quadras com horários livres'), big);
+});
+
+test('pedido de fotos e "todas as quadras"', () => {
+  for (const t of ['Me mande fotos das quadras por favor', 'tem foto da quadra?', 'quero ver as imagens', 'manda uma fotinha', 'Quero ver a quadra', 'como é a arena?', 'Foto da society 1']) assert.equal(isPhotoRequest(t), true, t);
+  for (const t of ['quero reservar', 'mandei o comprovante em foto', 'oi', 'areia 1', 'qual o valor?', 'quero ver horários']) assert.equal(isPhotoRequest(t), false, t);
+  for (const t of ['das 3', 'todas', 'de todas', 'as três', 'todas as quadras', 'pode ser das 3 quadras', 'tudo']) assert.equal(isAllCourts(t, 3), true, t);
+  for (const t of ['das 4', 'areia 1', 'às 20h', 'as 2', 'quero a society 2', '3']) assert.equal(isAllCourts(t, 3), false, t);
+  assert.equal(isAllCourts('das 3', 1), false, 'com uma quadra só não existe "todas"');
+});
+test('textos do fluxo de fotos', () => {
+  assert.equal(photoQuestion(['Areia 1', 'Society 1', 'Society 2']), 'Claro! De qual quadra você quer ver as fotos? Areia 1, Society 1 ou Society 2? Se preferir, mando de todas. 📸');
+  assert.deepEqual(photosOutcome({ sent: 3, failed: 0, without: [] }), { text: 'Quer agendar um horário? 📅', handoff: false });
+  assert.equal(photosOutcome({ sent: 2, failed: 0, without: ['Society 2'] }).text, 'Society 2 ainda não tem fotos cadastradas.\n\nQuer agendar um horário? 📅');
+  assert.match(photosOutcome({ sent: 1, failed: 0, without: ['Areia 1', 'Society 2'] }).text, /^Areia 1 e Society 2 ainda não têm fotos cadastradas\./);
+  assert.equal(photosOutcome({ sent: 0, failed: 0, without: ['Areia 1'] }).text, 'Areia 1 ainda não tem fotos cadastradas.\n\nQuer agendar um horário? 📅');
+  assert.deepEqual(photosOutcome({ sent: 0, failed: 2, without: [] }), { text: 'Não consegui enviar as fotos agora. Deixei um recado para a equipe te ajudar. 🙏', handoff: true });
+  assert.equal(photosOutcome({ sent: 1, failed: 1, without: [] }).handoff, true);
 });

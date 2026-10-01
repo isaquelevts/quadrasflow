@@ -9,9 +9,10 @@ import { db } from './database.js';
 import { bookingAmountCents } from './pricing.js';
 import { createBookingPixCharge, linkChargeCents, PIX_MINUTES } from './mercadopago.js';
 import { botPaused, DEFAULT_OUTSIDE_HOURS_MESSAGE, isOutsideHumanHours, LEGACY_OUTSIDE_HOURS_MESSAGE, outsideHoursText, wantsHuman } from './whatsapp-handoff-rules.js';
-import { confirmPendingBooking, dayScheduleReply, listFreeCourts, prepareBookingSummary, priceReply, runWhatsAppAgent, type AgentDeps, type PendingBooking } from './whatsapp-agent.js';
+import { activeCourts, confirmPendingBooking, dayScheduleReply, sendCourtPhotos, listFreeCourts, prepareBookingSummary, priceReply, runWhatsAppAgent, type AgentDeps, type PendingBooking } from './whatsapp-agent.js';
 import { durationLabel, parseTimeDuration, type Duration } from './whatsapp-court-search.js';
-import { DATE_QUESTION, NAME_QUESTION, askDurationText, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
+import { testPhoneMatches } from './whatsapp-test-mode.js';
+import { DATE_QUESTION, NAME_QUESTION, askDurationText, isAllCourts, isGreeting, isPhotoRequest, photoQuestion, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
 import { durationChoices, durationError, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { confirmsSummary } from './whatsapp-confirm.js';
 import { isSimulating, runSimulation, simulationNote, simulatorPhone, SIMULATOR_PREFIX } from './whatsapp-simulation.js';
@@ -37,7 +38,6 @@ function isPrivateIncomingPayload(payload:JsonRecord):boolean{
 type WahaConfig={session?:string;enabled?:boolean;status?:string};
 type BotConfig=PaymentPolicy&{timeZone:string;enabled:boolean;testMode:boolean;testPhones:string[];welcome:string;handoffMessage:string;reactivateAfterHours:number;humanStart:string;humanEnd:string;outsideHoursMessage:string;manualResumeOnly?:boolean;notifyPayment:boolean;remindUnpaid:boolean;menuOptions:{id:string;label:string;response:string}[]};
 const defaultBotConfig:BotConfig={timeZone:'',enabled:true,testMode:false,testPhones:[],welcome:'Como posso te ajudar?',handoffMessage:'Certo! Me conta rapidinho o que você precisa. A equipe responde por aqui assim que assumir. 👇',reactivateAfterHours:4,humanStart:'06:00',humanEnd:'23:00',outsideHoursMessage:DEFAULT_OUTSIDE_HOURS_MESSAGE,paymentMode:'none',paymentPercent:50,paymentFixedCents:5000,notifyPayment:true,remindUnpaid:true,menuOptions:[]};
-function testPhoneMatches(received:string,authorized:string){const incoming=digits(received),allowed=digits(authorized);if(incoming===allowed)return true;if(!incoming.startsWith('55')||!allowed.startsWith('55')||![12,13].includes(incoming.length)||![12,13].includes(allowed.length)||incoming.length===allowed.length||incoming.slice(2,4)!==allowed.slice(2,4))return false;const incomingNational=incoming.slice(4),allowedNational=allowed.slice(4);return incomingNational.length===9&&incomingNational.startsWith('9')&&incomingNational.slice(1)===allowedNational||allowedNational.length===9&&allowedNational.startsWith('9')&&allowedNational.slice(1)===incomingNational;}
 async function botConfig(companyId:string):Promise<BotConfig>{const row=(await db.select().from(integrationSettings).where(and(eq(integrationSettings.companyId,companyId),eq(integrationSettings.provider,'whatsapp_bot'))).limit(1))[0];const bot={...defaultBotConfig,...(row?.settings||{})} as BotConfig;if(bot.outsideHoursMessage===LEGACY_OUTSIDE_HOURS_MESSAGE)bot.outsideHoursMessage=DEFAULT_OUTSIDE_HOURS_MESSAGE;return bot;}
 /** Retomada do bot: a opção fica na configuração do bot; arenas antigas herdam a de "Informações & automações". */
 async function resumePolicy(companyId:string,bot:BotConfig){return {manualResumeOnly:bot.manualResumeOnly??(await serviceSettings(companyId)).manualResumeOnly,reactivateAfterHours:bot.reactivateAfterHours};}
@@ -169,8 +169,18 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  if(cancellation){delete context.pendingCancellation;delete context.cancellationFlow;delete context.cancellationOptions;await saveConversationState(company.id,phone,'',context);if(/^(não|nao|desisti)[.! ]*$/i.test(message)){await sendText(company.id,session,phone,'Tudo bem, sua reserva foi mantida.');return;}}
  if(key==='menu'){await saveConversationState(company.id,phone,'',{menu:true});await sendText(company.id,session,phone,`Como posso ajudar?\n1️⃣ Reservar uma quadra\n2️⃣ Falar com a equipe`);return;}
  if(/cancel|desist/i.test(message)){context.cancellationFlow=true;delete context.pendingBooking;delete context.intervalStage;delete context.intervalReservation;delete context.courtOptions;}
- if(/foto|imagem|imagens/i.test(message))context.photoRequested=true;
- if(context.cancellationFlow||context.photoRequested||/instagram|localiza|endere[çc]o|onde (?:fica|voc)|avalia[çc]/i.test(message)){
+ // Fotos: o sistema pergunta a quadra, guarda o pedido por 15 minutos e envia (a IA não participa). Respostas curtas ("areia 1", "das 3", "todas") valem.
+ const photoAsk=context.photoAsk as {at:string}|undefined,photoFresh=Boolean(photoAsk&&Date.now()-Date.parse(photoAsk.at)<15*60000),wantsPhotos=isPhotoRequest(message);
+ if(!photoFresh)delete context.photoAsk;delete context.photoRequested;
+ if((wantsPhotos||photoFresh)&&!context.pendingBooking&&!context.cancellationFlow){
+  const list=await activeCourts(company.id),one=list.length>1?matchCourt(message,list,false):null,picks=list.length===1||isAllCourts(message,list.length)?list:one?list.filter(c=>c.id===one):[];
+  if(list.length&&picks.length){
+   delete context.photoAsk;const text=await sendCourtPhotos(company.id,phone,picks,String(context.serviceRequestId||randomUUID()),message,context);
+   if(text.includes('Quer agendar'))context.priceAsked=true;await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,text);return;
+  }
+  if(list.length&&wantsPhotos){context.photoAsk={at:new Date().toISOString()};await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,photoQuestion(list.map(c=>c.name)));return;}
+ }
+ if(context.cancellationFlow||/instagram|localiza|endere[çc]o|onde (?:fica|voc)|avalia[çc]/i.test(message)){
   if(!aiConfigured()){await handoff(company.id,phone,'Solicitação precisa da equipe',message);await sendText(company.id,session,phone,bot.handoffMessage);return;}
   try{const answer=await callOpenAi(company.id,session,phone,context,message,false,receivedAt);if(!context.handoff)await saveConversationState(company.id,phone,'',context);if(answer)await sendText(company.id,session,phone,answer);}
   catch{await handoff(company.id,phone,'Falha no atendimento',message);await sendText(company.id,session,phone,bot.handoffMessage);}return;

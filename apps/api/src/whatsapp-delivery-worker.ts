@@ -1,4 +1,5 @@
 import {and,eq,gte,lte,sql} from 'drizzle-orm';
+import { isTestPhone } from './whatsapp-test-mode.js';
 import {bookings,companies,integrationSettings,whatsappDeliveries,whatsappMessages} from '@quadrasflow/database';
 import {db} from './database.js';
 import {arenaInformation,enqueueDelivery,integration,localPhoto,serviceSettings,wahaRequest} from './whatsapp-services.js';
@@ -38,7 +39,7 @@ export async function deliverOne(id?:string){
   if(isSimulatorPhone(job.destination)){await finish('skipped','Simulador do agente.');return true;}
   if(group&&(!cfg.groupEnabled||cfg.groupId!==job.destination||!cfg.events.includes(job.kind))){await finish('skipped');return true;}
   const phone=job.destination.replace(/@c\.us$/,'');
-  if(!group&&bot.testMode&&!((bot.testPhones||[]) as string[]).includes(phone)){await finish('skipped','Contato fora do modo de teste.');return true;}
+  if(!group&&bot.testMode&&!isTestPhone(phone,(bot.testPhones||[]) as string[])){await finish('skipped','Contato fora do modo de teste.');return true;}
   if(!waha.enabled||!waha.session||!process.env.WAHA_BASE_URL||!process.env.WAHA_API_KEY)throw new Error('WhatsApp desconectado.');
   let text=String(job.payload.text||'');
   if(job.kind==='review'){

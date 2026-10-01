@@ -8,7 +8,7 @@ import {
 } from '@openai/agents';
 import OpenAI from 'openai';
 import { z } from 'zod';
-import { and, asc, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { appAudit, clients, companies, companyHours, companyPriceSlots, courts, whatsappDeliveries, whatsappMessages } from '@quadrasflow/database';
 import { db } from './database.js';
 import { displayDate, localNow, parseArenaDate } from './arena-dates.js';
@@ -20,7 +20,7 @@ import { unsupportedClaim } from './whatsapp-agent-claims.js';
 import { freeCourtsMessage, parseTimeDuration, searchFreeCourts, type Duration } from './whatsapp-court-search.js';
 import { dateSaidByClient } from './whatsapp-date-guard.js';
 import { durationLabel, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
-import { DATE_QUESTION, dayScheduleMessage, isPeriodOnly, isTimesQuestion, noCourtsMessage, parsePeriod, periodOf, priceMessage, type Period } from './whatsapp-flow.js';
+import { DATE_QUESTION, dayScheduleMessage, photosOutcome, isPeriodOnly, isTimesQuestion, noCourtsMessage, parsePeriod, periodOf, priceMessage, type Period } from './whatsapp-flow.js';
 import { isOutsideHumanHours, outsideHoursText, type HumanHours } from './whatsapp-handoff-rules.js';
 
 export type PendingBooking = { courtId: string; courtName: string; date: string; startTime: string; durationMinutes: number; customerName: string; customerEmail?: string; amountCents: number; createdAt: string };
@@ -278,6 +278,33 @@ export async function priceReply(companyId: string, confirmedDate?: string) {
   return confirmedDate ? priceMessage(active, tariffs, days.map((d) => ({ ...d, isOpen: Boolean(d.isOpen) })), displayDate(confirmedDate), new Date(`${confirmedDate}T12:00:00Z`).getUTCDay()) : priceMessage(active, tariffs, days.map((d) => ({ ...d, isOpen: Boolean(d.isOpen) })));
 }
 
+/** Quadras ativas da arena, em ordem alfabética. */
+export const activeCourts = (companyId: string) => db.select({ id: courts.id, name: courts.name }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))).orderBy(asc(courts.name));
+
+/**
+ * Envia as fotos das quadras ao cliente (fila + envio na hora) e devolve o texto que fecha a conversa.
+ * Se algum envio falhar de verdade, deixa um recado para a equipe (sem pausar o bot).
+ */
+export async function sendCourtPhotos(companyId: string, phone: string, picks: ReadonlyArray<{ id: string; name: string }>, requestId: string, summary: string, context: Record<string, unknown>) {
+  let sent = 0, failed = 0; const without: string[] = [];
+  for (const court of picks) {
+    const queued = await queueCourtPhotos(companyId, phone, court.id, requestId) as { ids?: string[]; enviadas?: number };
+    if (queued.ids?.length) {
+      for (const id of queued.ids) await deliverOne(id);
+      const rows = await db.select({ status: whatsappDeliveries.status }).from(whatsappDeliveries).where(inArray(whatsappDeliveries.id, queued.ids));
+      const ok = rows.filter((r) => r.status === 'sent').length; sent += ok; failed += queued.ids.length - ok;
+    } else if (queued.enviadas) sent += queued.enviadas; // simulador do agente
+    else without.push(court.name);
+  }
+  const outcome = photosOutcome({ sent, failed, without });
+  if (outcome.handoff) {
+    await handoff(companyId, phone, 'Envio de fotos falhou', summary, { pause: false });
+    // O atendimento salva este contexto em seguida; sem isto o recado gravado pelo handoff seria apagado.
+    context.awaitingTeam = { at: new Date().toISOString(), reason: 'Envio de fotos falhou' };
+  }
+  return outcome.text;
+}
+
 /** Ferramentas do agente. As de reserva só existem quando fazem sentido nesta rodada (ex.: confirmar só depois do "sim"). */
 function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
   const court = courtNames.length ? z.enum(courtNames as [string, ...string[]]) : z.string();
@@ -302,19 +329,14 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
   const tools = [
     define('consultar_informacoes_arena', 'Consulta endereço, localização, Instagram e link de avaliação cadastrados. Use ao perguntarem informações da arena; nunca invente links.', empty,
       async (_args, turn) => arenaInformation(turn.companyId)),
-    define('enviar_fotos_quadra', 'Envia fotos reais da quadra somente quando o cliente pedir. Se a quadra não estiver clara, pergunte qual antes de chamar.', z.object({ quadra: court }),
+    define('enviar_fotos_quadra', 'Envia fotos reais da quadra quando o cliente pedir; "todas" envia as de todas as quadras. O sistema envia as fotos e a mensagem final; não escreva nada.', z.object({ quadra: z.enum(['todas', ...courtNames]) }),
       async (args, turn) => {
-        const c = turn.context;
-        if (!c.photoRequested) return reply(turn, 'Você quer ver as fotos de qual quadra?');
-        const found = await deps.resolveCourt(turn.companyId, String(args.quadra || ''));
-        if (!found) return { erro: 'Pergunte qual quadra o cliente quer ver.' };
-        delete c.photoRequested;
-        const queued = await queueCourtPhotos(turn.companyId, turn.phone, found.id, String(c.serviceRequestId || randomUUID()));
-        if (!queued.ids) return reply(turn, queued.mensagem!);
-        for (const id of queued.ids) await deliverOne(id);
-        const sent = await db.select({ status: whatsappDeliveries.status }).from(whatsappDeliveries).where(sql`${whatsappDeliveries.id} IN (${sql.join(queued.ids.map((id) => sql`${id}`), sql`,`)})`);
-        const count = sent.filter((r) => r.status === 'sent').length;
-        return reply(turn, count === queued.ids.length ? '' : count ? `Enviei ${count} foto(s). Não consegui confirmar o envio das demais; a equipe pode ajudar.` : 'Não consegui confirmar o envio das fotos agora. A equipe pode ajudar.');
+        const list = await activeCourts(turn.companyId), all = String(args.quadra) === 'todas';
+        const picks = all ? list : list.filter((c) => c.name === String(args.quadra));
+        if (!picks.length) return { erro: 'Pergunte qual quadra o cliente quer ver.' };
+        const text = await sendCourtPhotos(turn.companyId, turn.phone, picks, String(turn.context.serviceRequestId || randomUUID()), turn.message, turn.context);
+        if (text.includes('Quer agendar')) turn.context.priceAsked = true;
+        return reply(turn, text);
       }),
     define('listar_minhas_reservas', 'Lista apenas as próximas reservas deste contato nesta arena para escolher qual cancelar.', empty,
       async (_args, turn) => {
