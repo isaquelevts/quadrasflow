@@ -214,3 +214,26 @@ export function pickBooking(text: string, options: readonly BookingOption[], tod
   if (time && !dm && Number(time[1]) >= 5 && Number(time[1]) <= 23) { const hh = `${time[1]!.padStart(2, '0')}:${time[2] ?? '00'}`, at = list.filter((o) => o.start.slice(11, 16) === hh); if (at.length) list = at; }
   return (court || byDay || time) && list.length === 1 ? list[0]!.id : null;
 }
+
+/** Pedido de remarcação ("remarcar", "mudar o horário", "passar para outro dia", "adiar"). */
+export const isRescheduleIntent = (text: string) => {
+  const t = norm(text);
+  if (t.length > 160) return false;
+  return /\b(remarcar|remarca|remarque|remarcacao|reagendar|reagenda|adiar|antecipar)\b/.test(t)
+    || /\b(mudar|trocar|alterar|passar|mover)\b.{0,25}\b(horario|hora|dia|data|reserva)\b/.test(t)
+    || /\bpassar (?:a reserva )?(?:para|pra) outro (?:dia|horario)\b/.test(t);
+};
+
+const money = (cents: number) => `R$ ${(cents / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+/** Resumo da remarcação: de → para, valor e o que acontece com o que já foi pago. */
+export function rescheduleSummary(a: { from: string; to: string; amountCents: number; paidCents: number }) {
+  const value = a.paidCents <= 0 ? `💰 Valor: ${money(a.amountCents)} (pago na arena)`
+    : a.paidCents >= a.amountCents ? `💰 Valor: ${money(a.amountCents)} (já pago)${a.paidCents > a.amountCents ? `\nA diferença de ${money(a.paidCents - a.amountCents)} será devolvida pela equipe.` : ''}`
+    : `💰 Valor: ${money(a.amountCents)} (${money(a.paidCents)} já pago; ${money(a.amountCents - a.paidCents)} na arena)`;
+  return `🔁 Remarcar a reserva:\n\nDe: ${a.from}\nPara: ${a.to}\n${value}\n\nConfirma a remarcação?`;
+}
+/** Texto depois de remarcar. */
+export function rescheduledText(a: { to: string; amountCents: number; paidCents: number }) {
+  const extra = a.paidCents > a.amountCents ? `\n\nA diferença de ${money(a.paidCents - a.amountCents)} será devolvida pela equipe.` : a.paidCents > 0 && a.amountCents > a.paidCents ? `\n\nRestante a pagar na arena: ${money(a.amountCents - a.paidCents)}.` : '';
+  return `Pronto! Sua reserva foi remarcada para ${a.to}. ✅${extra}\n\nAté lá! 🙂`;
+}

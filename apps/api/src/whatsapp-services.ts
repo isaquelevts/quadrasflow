@@ -6,9 +6,11 @@ import {isSimulating,isSimulatorPhone,simulationNote} from './whatsapp-simulatio
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import sharp from 'sharp';
-import {and,eq,desc,sql} from 'drizzle-orm';
+import {and,eq,desc,lt,ne,sql} from 'drizzle-orm';
 import type {FastifyInstance} from 'fastify';
-import {companies,courts,bookings,bookingEvents,clients,integrationSettings,whatsappConversations,whatsappDeliveries,whatsappMessages,appAudit,financeEntries} from '@quadrasflow/database';
+import {companies,companyHours,companyPriceSlots,courts,blockedSlots,bookings,bookingEvents,clients,integrationSettings,whatsappConversations,whatsappDeliveries,whatsappMessages,appAudit,financeEntries} from '@quadrasflow/database';
+import {bookingAmountCents} from './pricing.js';
+import {findMonthlyConflict,monthlyConflictMessage} from './monthly-conflict.js';
 import {db} from './database.js';
 import {adminOf,companyOf,fail} from './arena.js';
 import {serviceDefaults,safePublicLink,chatDestination,bookingInstant,type ServiceSettings} from './whatsapp-service-rules.js';
@@ -95,6 +97,44 @@ export async function cancelOwnBooking(companyId:string,phone:string,id:string){
  const teamNotified=!done.already&&done.paid>0&&policy.refund!=='never';
  if(teamNotified)await handoff(companyId,phone,policy.refund==='always'?'Estorno a devolver (cliente cancelou)':'Analisar devolução (cliente cancelou)',`${done.name} cancelou ${done.label}. Valor pago: R$ ${(done.paid/100).toFixed(2).replace('.',',')}.`,{pause:false});
  return {cancelled:true,already:done.already,label:done.label,money:refundText(policy.refund,done.paid,'after'),teamNotified};
+}
+/** A remarcação pelo WhatsApp ainda é possível para esta reserva? (regra da arena e prazo antes do jogo) */
+export async function rescheduleCheck(companyId:string,row:{id:string;inicio:string;status:string}){
+ const [policy,bot]=await Promise.all([getBookingPolicy(companyId),integration(companyId,'whatsapp_bot')]);
+ if(!policy.allowReschedule)return {ok:false as const,reason:'off' as const,policy};
+ if(row.status==='pending'&&await hasOpenPix(companyId,row.id))return {ok:false as const,reason:'pix' as const,policy};
+ if(bookingInstant(row.inicio,bot.timeZone)-Date.now()<policy.rescheduleHours*3600000)return {ok:false as const,reason:'prazo' as const,policy};
+ return {ok:true as const,policy};
+}
+/**
+ * Remarca a reserva do próprio cliente (mesmas checagens da edição pelo painel). Mantém o que já foi pago, recalcula o valor
+ * e o "a receber"; se o novo valor for menor que o já pago, registra "Estorno a devolver" da diferença e avisa a equipe.
+ */
+export async function rescheduleOwnBooking(companyId:string,phone:string,id:string,to:{courtId:string;startAt:string;endAt:string}){
+ const before=(await ownBookings(companyId,phone)).find(r=>r.id===id);if(!before)throw fail(404,'Não encontrei essa reserva entre os seus próximos horários.');
+ const check=await rescheduleCheck(companyId,before);if(!check.ok)throw fail(409,'A remarcação dessa reserva não é mais possível por aqui.');
+ const result=await db.transaction(async tx=>{
+  const current=(await tx.select().from(bookings).where(and(eq(bookings.id,id),eq(bookings.companyId,companyId),eq(bookings.customerPhone,phone),sql`${bookings.status} IN ('pending','confirmed')`)).for('update'))[0];
+  if(!current)throw fail(404,'Reserva não encontrada.');
+  for(const court of [...new Set([current.courtId,to.courtId])].sort())await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${companyId}),hashtext(${court}))`);
+  const court=(await tx.select().from(courts).where(and(eq(courts.id,to.courtId),eq(courts.companyId,companyId),eq(courts.active,true))).limit(1))[0];if(!court)throw fail(404,'A quadra não está disponível.');
+  const weekday=new Date(`${to.startAt.slice(0,10)}T12:00:00Z`).getUTCDay(),hour=(await tx.select().from(companyHours).where(and(eq(companyHours.companyId,companyId),eq(companyHours.weekday,weekday))).limit(1))[0];
+  if(!hour?.isOpen||to.startAt.slice(11,16)<hour.openTime||to.endAt.slice(11,16)>hour.closeTime)throw fail(400,'Esse horário está fora do funcionamento da arena.');
+  const [conflict,block]=await Promise.all([tx.select({id:bookings.id}).from(bookings).where(and(eq(bookings.companyId,companyId),eq(bookings.courtId,to.courtId),ne(bookings.status,'cancelled'),ne(bookings.id,id),lt(bookings.startAt,to.endAt),sql`${bookings.endAt} > ${to.startAt}`)).limit(1),tx.select({id:blockedSlots.id}).from(blockedSlots).where(and(eq(blockedSlots.companyId,companyId),eq(blockedSlots.courtId,to.courtId),lt(blockedSlots.startAt,to.endAt),sql`${blockedSlots.endAt} > ${to.startAt}`)).limit(1)]);
+  if(conflict.length||block.length)throw fail(409,'Esse horário acabou de ser ocupado.');
+  const monthly=await findMonthlyConflict(tx,companyId,to.courtId,to.startAt,to.endAt);if(monthly)throw fail(409,monthlyConflictMessage(monthly));
+  const tariffs=await tx.select({weekday:companyPriceSlots.weekday,startTime:companyPriceSlots.startTime,endTime:companyPriceSlots.endTime,priceCents:companyPriceSlots.priceCents}).from(companyPriceSlots).where(eq(companyPriceSlots.companyId,companyId));
+  const amountCents=bookingAmountCents(to.startAt,to.endAt,court.priceCents,tariffs),now=new Date().toISOString();
+  await tx.update(bookings).set({courtId:to.courtId,startAt:to.startAt,endAt:to.endAt,amountCents,updatedAt:now}).where(eq(bookings.id,id));
+  await syncBookingReceivable(tx,companyId,id);
+  await tx.insert(bookingEvents).values({id:randomUUID(),companyId,bookingId:id,userId:null,event:'rescheduled',details:{source:'whatsapp',before:{courtId:current.courtId,startAt:current.startAt,endAt:current.endAt},after:to},createdAt:now});
+  await tx.insert(appAudit).values({id:randomUUID(),companyId,userId:null,action:'whatsapp.booking.rescheduled',entity:'booking',entityId:id,details:{phone},createdAt:now});
+  const paid=await paidForBooking(tx,companyId,id),label=bookingLabel({quadra:court.name,inicio:to.startAt,fim:to.endAt}),excess=Math.max(0,paid-amountCents);
+  if(excess>0)await recordRefundDecision(tx,{companyId,bookingId:id,refund:true,amountCents:excess,label:`${current.customerName} — ${label}`,dueDate:now.slice(0,10),reason:'remarcada para valor menor'});
+  return {label,amountCents,paid,excess,name:current.customerName};
+ });
+ if(result.excess>0)await handoff(companyId,phone,'Estorno a devolver (remarcação)',`${result.name} remarcou para ${result.label}; a diferença de R$ ${(result.excess/100).toFixed(2).replace('.',',')} deve ser devolvida.`,{pause:false});
+ return result;
 }
 export async function queueCourtPhotos(companyId:string,phone:string,courtId:string,requestId:string){
  const court=(await db.select().from(courts).where(and(eq(courts.id,courtId),eq(courts.companyId,companyId),eq(courts.active,true))).limit(1))[0];if(!court)throw fail(404,'Quadra não encontrada.');

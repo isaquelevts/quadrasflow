@@ -1,4 +1,5 @@
-import {arenaInformation,bookingLabel,serviceSettings,handoff,ownBookings,prepareCancellation,cancelOwnBooking,queueCourtPhotos} from './whatsapp-services.js';
+import {arenaInformation,bookingLabel,serviceSettings,handoff,ownBookings,prepareCancellation,cancelOwnBooking,queueCourtPhotos,rescheduleCheck,rescheduleOwnBooking} from './whatsapp-services.js';
+import {paidForBooking} from './booking-policy.js';
 import {deliverOne} from './whatsapp-delivery-worker.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { and, asc, desc, eq, gte, lt, ne, sql } from 'drizzle-orm';
@@ -12,7 +13,7 @@ import { botPaused, DEFAULT_OUTSIDE_HOURS_MESSAGE, isOutsideHumanHours, LEGACY_O
 import { activeCourts, confirmPendingBooking, saveClientEmail, dayScheduleReply, sendCourtPhotos, listFreeCourts, prepareBookingSummary, priceReply, runWhatsAppAgent, type AgentDeps, type PendingBooking } from './whatsapp-agent.js';
 import { durationLabel, parseTimeDuration, type Duration } from './whatsapp-court-search.js';
 import { testPhoneMatches } from './whatsapp-test-mode.js';
-import { DATE_QUESTION, NAME_QUESTION, askDurationText, isAllCourts, isCancelIntent, pickBooking, type BookingOption, isGreeting, isPhotoRequest, photoQuestion, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
+import { DATE_QUESTION, NAME_QUESTION, askDurationText, isAllCourts, isCancelIntent, isRescheduleIntent, rescheduleSummary, rescheduledText, pickBooking, type BookingOption, isGreeting, isPhotoRequest, photoQuestion, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
 import { durationChoices, durationError, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { confirmsCancellation, confirmsSummary } from './whatsapp-confirm.js';
 import { isSimulating, runSimulation, simulationNote, simulatorPhone, SIMULATOR_PREFIX } from './whatsapp-simulation.js';
@@ -91,13 +92,14 @@ function validDate(day:string){if(!/^\d{4}-\d{2}-\d{2}$/.test(day))return false;
 async function resolveCourt(companyId:string,name:string){const normalized=name.trim().toLocaleLowerCase('pt-BR');if(!normalized)return undefined;const list=await db.select().from(courts).where(and(eq(courts.companyId,companyId),eq(courts.active,true))).orderBy(asc(courts.name));return list.find(c=>c.id===name)||list.find(c=>c.name.toLocaleLowerCase('pt-BR')===normalized)||list.find(c=>c.name.toLocaleLowerCase('pt-BR').includes(normalized));}
 /** Duração máxima por reserva configurada pela arena (Configurações → Horários). */
 async function arenaMaxDuration(companyId:string){const row=(await db.select({publicOptions:companies.publicOptions}).from(companies).where(eq(companies.id,companyId)).limit(1))[0];return maxDurationOf(row?.publicOptions);}
-async function availability(companyId:string,courtId:string,day:string,duration:number):Promise<AvailabilityResult>{
+/** Inícios livres de uma quadra no dia. `exclude`: reserva que está sendo remarcada (não conta como ocupada). */
+async function availability(companyId:string,courtId:string,day:string,duration:number,exclude=''):Promise<AvailabilityResult>{
  if(!validDate(day))throw new Error('Use uma data válida no formato AAAA-MM-DD.');
  const today=localNow((await botConfig(companyId)).timeZone),last=new Date(`${today.date}T12:00:00Z`);last.setUTCDate(last.getUTCDate()+90);if(day<today.date||day>last.toISOString().slice(0,10))throw new Error('A data deve estar entre hoje e os próximos 90 dias.');
  const maxDuration=await arenaMaxDuration(companyId);if(!validDuration(duration,maxDuration))throw new Error(durationError(maxDuration));
  const hour=(await db.select().from(companyHours).where(and(eq(companyHours.companyId,companyId),eq(companyHours.weekday,new Date(`${day}T12:00:00Z`).getUTCDay()))).limit(1))[0];if(!hour?.isOpen)return {open:false,slots:[]};
  const opening=Number(hour.openTime.slice(0,2))*60+Number(hour.openTime.slice(3)),closing=Number(hour.closeTime.slice(0,2))*60+Number(hour.closeTime.slice(3)),[nh,nm]=today.time.split(':').map(Number),minimum=day===today.date?Math.max(opening,Math.ceil((nh!*60+nm!)/30)*30):opening;
- const weekday=new Date(`${day}T12:00:00Z`).getUTCDay(),[busy,blocks,members,tariffs,court]=await Promise.all([db.select().from(bookings).where(and(eq(bookings.companyId,companyId),eq(bookings.courtId,courtId),ne(bookings.status,'cancelled'),gte(bookings.startAt,`${day}T00:00:00.000Z`),lt(bookings.startAt,`${day}T24:00:00.000Z`))),db.select().from(blockedSlots).where(and(eq(blockedSlots.companyId,companyId),eq(blockedSlots.courtId,courtId),gte(blockedSlots.startAt,`${day}T00:00:00.000Z`),lt(blockedSlots.startAt,`${day}T24:00:00.000Z`))),db.select().from(monthlyMembers).where(and(eq(monthlyMembers.companyId,companyId),eq(monthlyMembers.courtId,courtId),eq(monthlyMembers.weekday,weekday),eq(monthlyMembers.status,'active'))),db.select({weekday:companyPriceSlots.weekday,startTime:companyPriceSlots.startTime,endTime:companyPriceSlots.endTime,priceCents:companyPriceSlots.priceCents}).from(companyPriceSlots).where(eq(companyPriceSlots.companyId,companyId)),db.select().from(courts).where(and(eq(courts.companyId,companyId),eq(courts.id,courtId),eq(courts.active,true))).limit(1)]);
+ const weekday=new Date(`${day}T12:00:00Z`).getUTCDay(),[busy,blocks,members,tariffs,court]=await Promise.all([db.select().from(bookings).where(and(eq(bookings.companyId,companyId),eq(bookings.courtId,courtId),ne(bookings.status,'cancelled'),exclude?ne(bookings.id,exclude):undefined,gte(bookings.startAt,`${day}T00:00:00.000Z`),lt(bookings.startAt,`${day}T24:00:00.000Z`))),db.select().from(blockedSlots).where(and(eq(blockedSlots.companyId,companyId),eq(blockedSlots.courtId,courtId),gte(blockedSlots.startAt,`${day}T00:00:00.000Z`),lt(blockedSlots.startAt,`${day}T24:00:00.000Z`))),db.select().from(monthlyMembers).where(and(eq(monthlyMembers.companyId,companyId),eq(monthlyMembers.courtId,courtId),eq(monthlyMembers.weekday,weekday),eq(monthlyMembers.status,'active'))),db.select({weekday:companyPriceSlots.weekday,startTime:companyPriceSlots.startTime,endTime:companyPriceSlots.endTime,priceCents:companyPriceSlots.priceCents}).from(companyPriceSlots).where(eq(companyPriceSlots.companyId,companyId)),db.select().from(courts).where(and(eq(courts.companyId,companyId),eq(courts.id,courtId),eq(courts.active,true))).limit(1)]);
  if(!court[0])throw new Error('Não encontrei essa quadra ativa.');const slots:AvailabilitySlot[]=[];for(let minute=minimum;minute+duration<=closing;minute+=30){const start=`${day}T${timeHH(minute)}:00.000Z`,end=`${day}T${timeHH(minute+duration)}:00.000Z`;const recurring=members.some(member=>{const from=Number(member.startTime.slice(0,2))*60+Number(member.startTime.slice(3));return from<minute+duration&&from+member.durationMinutes>minute;});if(!recurring&&![...busy,...blocks].some(x=>x.startAt<end&&x.endAt>start)){const cents=bookingAmountCents(start,end,court[0].priceCents,tariffs),value=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(cents/100);slots.push({inicio:timeHH(minute),valor:value,amountCents:cents});}}
  return {open:true,quadra:court[0].name,slots};
 }
@@ -175,6 +177,71 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   const id=pickBooking(message,cancelPick.options,localNow(bot.timeZone||'America/Belem',receivedAt).date);
   if(id){try{await startCancellation(id);}catch{delete context.cancelPick;await sayCancel('Essa reserva não está mais disponível para cancelar. Quer que eu mostre as suas reservas de novo?');}return;}
  }else if(cancelPick)delete context.cancelPick;
+ // Remarcação: feita pelo sistema. Escolhe a reserva, confere a regra da arena (desligada, prazo, Pix em aberto),
+ // pede o novo dia/horário (mesma quadra e duração, a não ser que o cliente diga outras), confere a agenda e confirma.
+ type Reschedule={at:string;step:'pick'|'when'|'confirm';options?:BookingOption[]|undefined;bookingId?:string|undefined;courtId?:string|undefined;courtName?:string|undefined;minutes?:number|undefined;from?:string|undefined;day?:string|undefined;start?:string|undefined;to?:{courtId:string;courtName:string;startAt:string;endAt:string;amountCents:number;paidCents:number}};
+ const rs=context.reschedule as Reschedule|undefined,rsFresh=Boolean(rs&&Date.now()-Date.parse(rs.at)<15*60000);
+ if(rs&&!rsFresh)delete context.reschedule;
+ const sayRs=async(text:string)=>{if(context.reschedule)(context.reschedule as Reschedule).at=new Date().toISOString();await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,text);};
+ const blockedText=(reason:'off'|'prazo'|'pix',hours:number)=>reason==='off'?'Por aqui não dá para remarcar reservas. 🙂 Se quiser, eu cancelo esta e você marca outro horário, ou chamo a equipe para te ajudar.':reason==='pix'?'Essa reserva ainda está aguardando o pagamento do Pix. Depois de pagar, você pode remarcar por aqui; se preferir, eu cancelo. 🙂':`A remarcação pelo WhatsApp só é possível até ${hours} ${hours===1?'hora':'horas'} antes do jogo. Se quiser, posso cancelar a reserva ou chamar a equipe. 🙂`;
+ /** Entende dia, horário, duração e quadra ditos pelo cliente e responde (horários livres, pergunta ou resumo). null = a mensagem não falou de quando. */
+ const rescheduleWhen=async(state:Reschedule,text:string):Promise<string|null>=>{
+  const asked=parseTimeDuration(text),bare=parseBareTime(text),start=asked.start??bare,saysDay=saysDate(text);
+  const list=await activeCourts(company.id),courtHit=list.length>1?matchCourt(text,list,false):null;
+  if(!saysDay&&!start&&!asked.duration&&!courtHit)return null;
+  let day=state.day;
+  if(saysDay){const parsed=parseArenaDate(text,bot.timeZone,receivedAt);if(!parsed.date)return parsed.question||'Qual dia você prefere? 📅';day=parsed.date;}
+  const courtId=courtHit??state.courtId!,courtName=list.find(c=>c.id===courtId)?.name||state.courtName||'',maxDuration=await arenaMaxDuration(company.id),minutes=asked.duration??state.minutes!;
+  if(!validDuration(minutes,maxDuration))return `${durationError(maxDuration)} Qual duração você prefere?`;
+  Object.assign(state,{courtId,courtName,minutes,...(day?{day}:{})});
+  if(!day){state.start=start??undefined;return 'Para qual dia você quer mudar? 📅';}
+  const chosen=start??state.start;
+  const free=await availability(company.id,courtId,day,minutes,state.bookingId);
+  const times=free.slots.map(x=>x.inicio),when=`${displayDate(day)}`;
+  if(!free.open)return `A arena está fechada em ${when}. Qual outro dia você prefere? 📅`;
+  if(!chosen){state.step='when';return times.length?`📅 ${when} — horários livres na ${courtName} (${durationLabel(minutes)}):\n\n🕒 ${times.join(' · ')}\n\nQual horário você prefere?`:`Em ${when} não tem horário livre na ${courtName} para ${durationLabel(minutes)}. Quer tentar outro dia? 📅`;}
+  const slot=free.slots.find(x=>x.inicio===chosen);
+  if(!slot){state.step='when';state.start=undefined;return times.length?`${timeUnavailableText(chosen,day===localNow(bot.timeZone,receivedAt).date&&chosen<=localNow(bot.timeZone,receivedAt).time?'passou':'ocupado')}\n\n🕒 ${times.join(' · ')}\n\nQual deles você prefere?`:`Em ${when} não tem horário livre na ${courtName} para ${durationLabel(minutes)}. Quer tentar outro dia? 📅`;}
+  const startMin=Number(chosen.slice(0,2))*60+Number(chosen.slice(3)),startAt=`${day}T${chosen}:00.000Z`,endAt=`${day}T${timeHH(startMin+minutes)}:00.000Z`;
+  const original=(await db.select({courtId:bookings.courtId,startAt:bookings.startAt,endAt:bookings.endAt}).from(bookings).where(eq(bookings.id,state.bookingId!)).limit(1))[0];
+  if(original&&original.courtId===courtId&&original.startAt===startAt&&original.endAt===endAt)return 'Esse já é o horário da sua reserva. 🙂 Para quando você quer mudar?';
+  const paid=await paidForBooking(db,company.id,state.bookingId!);
+  state.to={courtId,courtName,startAt,endAt,amountCents:slot.amountCents,paidCents:paid};state.step='confirm';
+  return rescheduleSummary({from:state.from!,to:bookingLabel({quadra:courtName,inicio:startAt,fim:endAt}),amountCents:slot.amountCents,paidCents:paid});
+ };
+ const startReschedule=async(row:{id:string;quadra:string;inicio:string;fim:string;status:string},text:string)=>{
+  const check=await rescheduleCheck(company.id,row);delete context.reschedule;
+  if(!check.ok){await sayRs(blockedText(check.reason,check.policy.rescheduleHours));return;}
+  const b=(await db.select({courtId:bookings.courtId}).from(bookings).where(eq(bookings.id,row.id)).limit(1))[0];
+  const state:Reschedule={at:new Date().toISOString(),step:'when',bookingId:row.id,courtId:b?.courtId,courtName:row.quadra,minutes:(Date.parse(row.fim)-Date.parse(row.inicio))/60000,from:bookingLabel(row),day:row.inicio.slice(0,10)/* só o horário = mesmo dia da reserva */};
+  context.reschedule=state;delete context.pendingBooking;delete context.chosen;delete context.cancelPick;delete context.pendingCancellation;
+  const reply=await rescheduleWhen(state,text);
+  await sayRs(reply??`Para quando você quer mudar a reserva da ${state.from}? Me diga o dia e o horário. 🙂`);
+ };
+ if(rs&&rsFresh){
+  if(rs.step==='confirm'&&rs.to&&(confirmsSummary(message)||affirmative(message))){
+   delete context.reschedule;
+   try{const done=await rescheduleOwnBooking(company.id,phone,rs.bookingId!,{courtId:rs.to.courtId,startAt:rs.to.startAt,endAt:rs.to.endAt});if(done.excess>0)context.awaitingTeam={at:new Date().toISOString(),reason:'Estorno a devolver (remarcação)'};await sayRs(rescheduledText({to:done.label,amountCents:done.amountCents,paidCents:done.paid}));}
+   catch(error){const why=error instanceof Error?error.message:'';await sayRs(`Não consegui remarcar: ${why||'o horário não está mais disponível'}. Quer escolher outro horário? 🙂`);}
+   return;
+  }
+  if(/^(n[ãa]o|nao|desisti|deixa|esquece|cancela a remarca)/i.test(message.trim())&&rs.step!=='pick'){delete context.reschedule;await sayRs('Tudo bem, sua reserva continua como estava. 🙂');return;}
+  if(rs.step==='pick'&&rs.options){
+   const id=pickBooking(message,rs.options,localNow(bot.timeZone||'America/Belem',receivedAt).date),row=id?(await ownBookings(company.id,phone)).find(r=>r.id===id):undefined;
+   if(row){await startReschedule(row,'');return;}
+  }else if(rs.step!=='pick'){
+   const reply=await rescheduleWhen(rs,message);
+   if(reply){context.reschedule=rs;await sayRs(reply);return;}
+  }
+ }
+ if(isRescheduleIntent(message)){
+  if(!bot.timeZone){await handoff(company.id,phone,'Remarcação (arena sem fuso)',message,{pause:false});context.awaitingTeam={at:new Date().toISOString(),reason:'Remarcação'};await sayRs('Vou pedir para a equipe te ajudar com a remarcação. 🙏');return;}
+  const list=await ownBookings(company.id,phone);
+  if(!list.length){delete context.reschedule;await sayRs('Não encontrei reservas futuras feitas por este número para remarcar. Se ela foi feita por outro número, me diga que eu chamo a equipe. 🙂');return;}
+  if(list.length===1){await startReschedule(list[0]!,message);return;}
+  context.reschedule={at:new Date().toISOString(),step:'pick',options:list.map(r=>({id:r.id,court:r.quadra,start:r.inicio}))} satisfies Reschedule;
+  await sayRs(`Você tem estas reservas:\n\n${list.map((r,n)=>`${n+1}. ${bookingLabel(r)}`).join('\n')}\n\nQual delas você quer remarcar? Envie o número.`);return;
+ }
  if(isCancelIntent(message)){
   delete context.cancelPick;
   if(!bot.timeZone){await handoff(company.id,phone,'Cancelamento (arena sem fuso)',message,{pause:false});await sayCancel('Vou pedir para a equipe te ajudar com o cancelamento. 🙏');return;}

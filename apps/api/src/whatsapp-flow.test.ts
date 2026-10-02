@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isCancelIntent, pickBooking, isAllCourts, isPhotoRequest, photoQuestion, photosOutcome, askDurationText, courtPriceRange, dayScheduleMessage, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, noCourtsMessage, parseBareTime, parsePeriod, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
+import { isRescheduleIntent, rescheduleSummary, rescheduledText, isCancelIntent, pickBooking, isAllCourts, isPhotoRequest, photoQuestion, photosOutcome, askDurationText, courtPriceRange, dayScheduleMessage, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, noCourtsMessage, parseBareTime, parsePeriod, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
 
 test('horário solto depois da lista', () => {
   const cases: Array<[string, string | null]> = [['20', '20:00'], ['20h', '20:00'], ['às 20', '20:00'], ['as 17', '17:00'], ['20:30', '20:30'], ['20h30', '20:30'], ['21 horas', '21:00'], ['pode ser 20', null],
@@ -115,4 +115,17 @@ test('escolha da reserva na lista', () => {
   const cases: Array<[string, string | null]> = [['1', 'a'], ['2', 'b'], ['a 3', 'c'], ['4', null], ['a da areia', 'b'], ['areia 1', 'b'], ['a de sábado', 'b'], ['a de hoje', 'a'], ['amanhã', 'b'], ['dia 5', 'c'], ['05/10', 'c'], ['society 1 de sexta', 'a'],
     ['society 1', null], ['a das 19h', null], ['sim', null], ['quero cancelar', null]];
   for (const [text, expected] of cases) assert.equal(pickBooking(text, opts, '2026-10-02'), expected, text);
+});
+
+test('pedido de remarcação', () => {
+  for (const t of ['quero remarcar minha reserva', 'dá pra remarcar?', 'preciso mudar o horário', 'posso trocar o dia da reserva?', 'quero passar pra outro dia', 'reagendar', 'tem como adiar para sábado?']) assert.equal(isRescheduleIntent(t), true, t);
+  for (const t of ['quero reservar', 'quero cancelar', 'qual o horário de funcionamento?', 'oi']) assert.equal(isRescheduleIntent(t), false, t);
+});
+test('resumo e confirmação da remarcação', () => {
+  const base = { from: 'Society 1, qui 01/10, 19:00–20:00', to: 'Society 1, sex 02/10, 20:00–21:00' };
+  assert.equal(rescheduleSummary({ ...base, amountCents: 10000, paidCents: 0 }), '🔁 Remarcar a reserva:\n\nDe: Society 1, qui 01/10, 19:00–20:00\nPara: Society 1, sex 02/10, 20:00–21:00\n💰 Valor: R$ 100,00 (pago na arena)\n\nConfirma a remarcação?');
+  assert.match(rescheduleSummary({ ...base, amountCents: 10000, paidCents: 100 }), /R\$ 100,00 \(R\$ 1,00 já pago; R\$ 99,00 na arena\)/);
+  assert.match(rescheduleSummary({ ...base, amountCents: 10000, paidCents: 15000 }), /\(já pago\)\nA diferença de R\$ 50,00 será devolvida pela equipe\./);
+  assert.match(rescheduledText({ to: base.to, amountCents: 10000, paidCents: 100 }), /^Pronto! Sua reserva foi remarcada para Society 1, sex 02\/10, 20:00–21:00\. ✅\n\nRestante a pagar na arena: R\$ 99,00\./);
+  assert.doesNotMatch(rescheduledText({ to: base.to, amountCents: 10000, paidCents: 0 }), /Restante/);
 });
