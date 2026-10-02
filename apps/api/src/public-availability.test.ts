@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { endOptions, freeStarts, toMinutes } from './public-availability.js';
+import type { CourtRules } from './court-rules.js';
 
 const h = (hhmm: string) => toMinutes(hhmm);
 const busy = [{ start: h('19:00'), end: h('21:00') }]; // reserva 19–21
@@ -22,4 +23,19 @@ test('fins: de 1h até 8h, parando na próxima reserva ou no fechamento', () => 
   assert.equal(endOptions(h('21:00'), h('23:00'), busy).at(-1), h('23:00'));
   assert.equal(endOptions(h('08:00'), h('23:00'), []).at(-1), h('16:00'), 'máximo de 8h');
   assert.deepEqual(endOptions(h('22:30'), h('23:00'), []), [], 'menos de 1h até fechar');
+});
+
+test('só horas cheias: inícios em hora cheia e fins de hora em hora', () => {
+  const r: CourtRules = { step: 60, prime: [] };
+  assert.deepEqual(freeStarts(h('08:30'), h('12:00'), 0, [], r), [h('09:00'), h('10:00'), h('11:00')]);
+  assert.deepEqual(endOptions(h('09:00'), h('12:00'), [], 480, r), [h('10:00'), h('11:00'), h('12:00')]);
+  assert.ok(!freeStarts(h('08:00'), h('23:00'), 0, [{ start: h('19:30'), end: h('20:30') }], r).includes(h('19:00')), '19h não cabe 1h inteira antes das 19:30');
+});
+test('horário nobre: 19h só aparece se couber o mínimo', () => {
+  const r: CourtRules = { step: 30, prime: [{ days: [3], from: '19:00', to: '21:00', minMinutes: 120 }] };
+  assert.deepEqual(endOptions(h('19:00'), h('23:00'), [], 480, r, 3).slice(0, 2), [h('21:00'), h('21:30')], 'fins de 20:00 e 20:30 somem');
+  assert.deepEqual(endOptions(h('17:00'), h('23:00'), [], 480, r, 3).slice(0, 3), [h('18:00'), h('18:30'), h('19:00')], '17h–18h segue livre (não encosta)');
+  assert.ok(endOptions(h('17:00'), h('23:00'), [], 480, r, 3).includes(h('19:30')), '17h–19h30 encosta no nobre com 2h30: aceita');
+  assert.ok(!freeStarts(h('08:00'), h('23:00'), 0, [{ start: h('20:00'), end: h('21:00') }], r, 3).includes(h('19:00')), '19h com reserva às 20h: não cabe 2h');
+  assert.ok(freeStarts(h('08:00'), h('23:00'), 0, [], r, 4).includes(h('19:00')) && endOptions(h('19:00'), h('23:00'), [], 480, r, 4)[0] === h('20:00'), 'outro dia sem regra');
 });

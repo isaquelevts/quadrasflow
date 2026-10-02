@@ -73,7 +73,8 @@ export function matchCourt(text: string, courts: ReadonlyArray<{ id: string; nam
 /** Só o horário é conhecido: pergunta a duração mostrando o que cabe naquela quadra. */
 export function askDurationText(court: string, start: string, durations: readonly number[]) {
   const labels = durations.map(durationLabel);
-  const fits = labels.length > 3 ? `de ${labels[0]} até ${labels.at(-1)}` : joinOu(labels);
+  const hourly = durations.every((d) => d % 60 === 0);
+  const fits = labels.length > 3 ? `de ${labels[0]} até ${labels.at(-1)}${hourly ? ', em horas cheias' : ''}` : joinOu(labels);
   return `⏱️ Na ${court}, às ${start}, dá para jogar ${fits}. Qual duração você prefere?`;
 }
 

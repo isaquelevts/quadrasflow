@@ -50,6 +50,13 @@
       "when": 1790905823924,
       "tag": "0006_client_email",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790943664417,
+      "tag": "0007_court_booking_rules",
+      "breakpoints": true
     }
   ]
 }

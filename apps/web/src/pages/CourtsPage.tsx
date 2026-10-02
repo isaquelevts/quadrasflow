@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Banknote, CalendarCheck2, CalendarDays, Clock, Gauge, LandPlot, LoaderCircle, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Banknote, CalendarCheck2, CalendarDays, Clock, Gauge, LandPlot, LoaderCircle, Pencil, Plus, Timer, Trash2 } from 'lucide-react';
 import { addDays, startOfWeek } from 'date-fns';
 import { toast } from 'sonner';
 import { ArenaImagePicker } from '@/components/ArenaImagePicker';
@@ -81,7 +81,7 @@ export function CourtsPage() {
 
   return <div className="space-y-4 lg:space-y-5">
     <PageHeader title="Quadras" description="Modalidades, preços e ocupação de hoje."
-      actions={isAdmin ? <Button className="hidden md:inline-flex" onClick={() => setEditing('new')}><Plus /> Adicionar quadra</Button> : undefined} />
+      actions={isAdmin ? <div className="flex flex-wrap gap-2"><Button variant="outline" asChild><Link to="/configuracoes?secao=regras"><Timer /> Regras de horário</Link></Button><Button className="hidden md:inline-flex" onClick={() => setEditing('new')}><Plus /> Adicionar quadra</Button></div> : undefined} />
     {error && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{error}</div>}
 
     {loading && !courts.length ? <div className="grid min-h-60 place-items-center"><LoaderCircle className="animate-spin text-brand-600" aria-label="Carregando" /></div> : <>

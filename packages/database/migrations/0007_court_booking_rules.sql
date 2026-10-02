@@ -1,0 +1,1 @@
+ALTER TABLE "courts" ADD COLUMN "booking_rules" jsonb DEFAULT '{}'::jsonb NOT NULL;

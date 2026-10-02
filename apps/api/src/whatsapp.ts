@@ -13,6 +13,7 @@ import { botPaused, DEFAULT_OUTSIDE_HOURS_MESSAGE, isOutsideHumanHours, LEGACY_O
 import { activeCourts, confirmPendingBooking, saveClientEmail, dayScheduleReply, sendCourtPhotos, listFreeCourts, prepareBookingSummary, priceReply, runWhatsAppAgent, type AgentDeps, type PendingBooking } from './whatsapp-agent.js';
 import { durationLabel, parseTimeDuration, type Duration } from './whatsapp-court-search.js';
 import { testPhoneMatches } from './whatsapp-test-mode.js';
+import { parseCourtRules, ruleProblem, ruleProblemText } from './court-rules.js';
 import { DATE_QUESTION, NAME_QUESTION, askDurationText, isAllCourts, isCancelIntent, isRescheduleIntent, rescheduleSummary, rescheduledText, pickBooking, type BookingOption, isGreeting, isPhotoRequest, photoQuestion, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
 import { durationChoices, durationError, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { confirmsCancellation, confirmsSummary } from './whatsapp-confirm.js';
@@ -92,6 +93,12 @@ function validDate(day:string){if(!/^\d{4}-\d{2}-\d{2}$/.test(day))return false;
 async function resolveCourt(companyId:string,name:string){const normalized=name.trim().toLocaleLowerCase('pt-BR');if(!normalized)return undefined;const list=await db.select().from(courts).where(and(eq(courts.companyId,companyId),eq(courts.active,true))).orderBy(asc(courts.name));return list.find(c=>c.id===name)||list.find(c=>c.name.toLocaleLowerCase('pt-BR')===normalized)||list.find(c=>c.name.toLocaleLowerCase('pt-BR').includes(normalized));}
 /** Duração máxima por reserva configurada pela arena (Configurações → Horários). */
 async function arenaMaxDuration(companyId:string){const row=(await db.select({publicOptions:companies.publicOptions}).from(companies).where(eq(companies.id,companyId)).limit(1))[0];return maxDurationOf(row?.publicOptions);}
+/** A reserva pedida fere uma regra da quadra (horas cheias, horário nobre)? Devolve a explicação para o cliente. */
+async function courtRuleIssue(courtId:string,day:string,start:string,minutes:number){
+ const court=(await db.select({name:courts.name,rules:courts.bookingRules}).from(courts).where(eq(courts.id,courtId)).limit(1))[0];if(!court)return null;
+ const s=Number(start.slice(0,2))*60+Number(start.slice(3)),problem=ruleProblem(parseCourtRules(court.rules),new Date(`${day}T12:00:00Z`).getUTCDay(),s,s+minutes);
+ return problem?{problem,text:ruleProblemText(problem,court.name)}:null;
+}
 /** Inícios livres de uma quadra no dia. `exclude`: reserva que está sendo remarcada (não conta como ocupada). */
 async function availability(companyId:string,courtId:string,day:string,duration:number,exclude=''):Promise<AvailabilityResult>{
  if(!validDate(day))throw new Error('Use uma data válida no formato AAAA-MM-DD.');
@@ -100,7 +107,7 @@ async function availability(companyId:string,courtId:string,day:string,duration:
  const hour=(await db.select().from(companyHours).where(and(eq(companyHours.companyId,companyId),eq(companyHours.weekday,new Date(`${day}T12:00:00Z`).getUTCDay()))).limit(1))[0];if(!hour?.isOpen)return {open:false,slots:[]};
  const opening=Number(hour.openTime.slice(0,2))*60+Number(hour.openTime.slice(3)),closing=Number(hour.closeTime.slice(0,2))*60+Number(hour.closeTime.slice(3)),[nh,nm]=today.time.split(':').map(Number),minimum=day===today.date?Math.max(opening,Math.ceil((nh!*60+nm!)/30)*30):opening;
  const weekday=new Date(`${day}T12:00:00Z`).getUTCDay(),[busy,blocks,members,tariffs,court]=await Promise.all([db.select().from(bookings).where(and(eq(bookings.companyId,companyId),eq(bookings.courtId,courtId),ne(bookings.status,'cancelled'),exclude?ne(bookings.id,exclude):undefined,gte(bookings.startAt,`${day}T00:00:00.000Z`),lt(bookings.startAt,`${day}T24:00:00.000Z`))),db.select().from(blockedSlots).where(and(eq(blockedSlots.companyId,companyId),eq(blockedSlots.courtId,courtId),gte(blockedSlots.startAt,`${day}T00:00:00.000Z`),lt(blockedSlots.startAt,`${day}T24:00:00.000Z`))),db.select().from(monthlyMembers).where(and(eq(monthlyMembers.companyId,companyId),eq(monthlyMembers.courtId,courtId),eq(monthlyMembers.weekday,weekday),eq(monthlyMembers.status,'active'))),db.select({weekday:companyPriceSlots.weekday,startTime:companyPriceSlots.startTime,endTime:companyPriceSlots.endTime,priceCents:companyPriceSlots.priceCents}).from(companyPriceSlots).where(eq(companyPriceSlots.companyId,companyId)),db.select().from(courts).where(and(eq(courts.companyId,companyId),eq(courts.id,courtId),eq(courts.active,true))).limit(1)]);
- if(!court[0])throw new Error('Não encontrei essa quadra ativa.');const slots:AvailabilitySlot[]=[];for(let minute=minimum;minute+duration<=closing;minute+=30){const start=`${day}T${timeHH(minute)}:00.000Z`,end=`${day}T${timeHH(minute+duration)}:00.000Z`;const recurring=members.some(member=>{const from=Number(member.startTime.slice(0,2))*60+Number(member.startTime.slice(3));return from<minute+duration&&from+member.durationMinutes>minute;});if(!recurring&&![...busy,...blocks].some(x=>x.startAt<end&&x.endAt>start)){const cents=bookingAmountCents(start,end,court[0].priceCents,tariffs),value=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(cents/100);slots.push({inicio:timeHH(minute),valor:value,amountCents:cents});}}
+ if(!court[0])throw new Error('Não encontrei essa quadra ativa.');const rules=parseCourtRules(court[0].bookingRules),slots:AvailabilitySlot[]=[];/* regras da quadra: só horas cheias e horário nobre */for(let minute=Math.ceil(minimum/rules.step)*rules.step;minute+duration<=closing;minute+=rules.step){if(ruleProblem(rules,weekday,minute,minute+duration))continue;const start=`${day}T${timeHH(minute)}:00.000Z`,end=`${day}T${timeHH(minute+duration)}:00.000Z`;const recurring=members.some(member=>{const from=Number(member.startTime.slice(0,2))*60+Number(member.startTime.slice(3));return from<minute+duration&&from+member.durationMinutes>minute;});if(!recurring&&![...busy,...blocks].some(x=>x.startAt<end&&x.endAt>start)){const cents=bookingAmountCents(start,end,court[0].priceCents,tariffs),value=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(cents/100);slots.push({inicio:timeHH(minute),valor:value,amountCents:cents});}}
  return {open:true,quadra:court[0].name,slots};
 }
 function previewSlots(slots:AvailabilitySlot[],period:string){
@@ -200,6 +207,8 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   const times=free.slots.map(x=>x.inicio),when=`${displayDate(day)}`;
   if(!free.open)return `A arena está fechada em ${when}. Qual outro dia você prefere? 📅`;
   if(!chosen){state.step='when';return times.length?`📅 ${when} — horários livres na ${courtName} (${durationLabel(minutes)}):\n\n🕒 ${times.join(' · ')}\n\nQual horário você prefere?`:`Em ${when} não tem horário livre na ${courtName} para ${durationLabel(minutes)}. Quer tentar outro dia? 📅`;}
+  const rsIssue=await courtRuleIssue(courtId,day,chosen,minutes);
+  if(rsIssue){state.step='when';state.start=undefined;return `${rsIssue.text}\n\n${times.length?`🕒 ${times.join(' · ')}\n\nQual deles você prefere?`:'Quer tentar outro dia ou outra duração? 📅'}`;}
   const slot=free.slots.find(x=>x.inicio===chosen);
   if(!slot){state.step='when';state.start=undefined;return times.length?`${timeUnavailableText(chosen,day===localNow(bot.timeZone,receivedAt).date&&chosen<=localNow(bot.timeZone,receivedAt).time?'passou':'ocupado')}\n\n🕒 ${times.join(' · ')}\n\nQual deles você prefere?`:`Em ${when} não tem horário livre na ${courtName} para ${durationLabel(minutes)}. Quer tentar outro dia? 📅`;}
   const startMin=Number(chosen.slice(0,2))*60+Number(chosen.slice(3)),startAt=`${day}T${chosen}:00.000Z`,endAt=`${day}T${timeHH(startMin+minutes)}:00.000Z`;
@@ -300,6 +309,9 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  const proceedToBooking=async(court:{id:string;name:string},day:string,start:string,minutes:number):Promise<string>=>{
   delete context.timesShown;context.search={date:day,start,duration:minutes};context.selectedCourtId=court.id;context.selectedCourtName=court.name;
   const unavailable=async()=>{context.timesShown=true;context.search={date:day,start:null,duration:minutes};return `${timeUnavailableText(start,reasonFor(day,start))}\n\n${await availableTimesReply(company.id,court.id,day,minutes)}`;};
+  const issue=await courtRuleIssue(court.id,day,start,minutes);
+  if(issue?.problem.kind==='start'){context.timesShown=true;context.search={date:day,start:null,duration:minutes%60?60:minutes};return `${issue.text}\n\n${await availableTimesReply(company.id,court.id,day,minutes%60?60:minutes)}`;}
+  if(issue){context.search={date:day,start,duration:null};return `${issue.text}\n\n${await askDuration(court,day,start)}`;}
   const free=await availability(company.id,court.id,day,minutes);if(!free.slots.some(x=>x.inicio===start))return unavailable();
   context.chosen={courtId:court.id,courtName:court.name,date:day,start,minutes};
   const saved=(await db.select({name:clients.name}).from(clients).where(and(eq(clients.companyId,company.id),eq(clients.phone,phone))).limit(1))[0]?.name||'';
@@ -311,19 +323,25 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  const reasonFor=(day:string,start:string)=>{const now=localNow(bot.timeZone,receivedAt);return day===now.date&&start<=now.time?'passou' as const:'ocupado' as const;};
  /** Só o horário é conhecido: pergunta a duração (as que cabem naquela quadra) ou, se não cabe, mostra os horários livres dela. */
  const askDuration=async(court:{id:string;name:string},day:string,start:string):Promise<string>=>{
-  // Se não cabe por X minutos, não cabe por mais: para na primeira duração que não cabe.
-  const fits:number[]=[];for(const minutes of durationChoices(await arenaMaxDuration(company.id))){const free=await availability(company.id,court.id,day,minutes);if(!free.slots.some(x=>x.inicio===start))break;fits.push(minutes);}
+  // Regras da quadra (horas cheias, horário nobre) só tiram algumas durações; ocupação para na primeira que não cabe.
+  const fits:number[]=[];for(const minutes of durationChoices(await arenaMaxDuration(company.id))){if(await courtRuleIssue(court.id,day,start,minutes))continue;const free=await availability(company.id,court.id,day,minutes);if(!free.slots.some(x=>x.inicio===start))break;fits.push(minutes);}
   if(fits.length){delete context.timesShown;context.search={date:day,start,duration:null};return askDurationText(court.name,start,fits);}
-  context.timesShown=true;context.search={date:day,start:null,duration:60};return `${timeUnavailableText(start,reasonFor(day,start))}\n\n${await availableTimesReply(company.id,court.id,day,60)}`;
+  // Nenhuma duração cabe: se é por regra da quadra (ex.: 19h30 numa quadra de horas cheias), diz a regra, não "ocupado".
+  const startIssue=await courtRuleIssue(court.id,day,start,60);
+  context.timesShown=true;context.search={date:day,start:null,duration:60};return `${startIssue?.problem.kind==='start'?startIssue.text:timeUnavailableText(start,reasonFor(day,start))}\n\n${await availableTimesReply(company.id,court.id,day,60)}`;
  };
  //    A quadra citada na própria frase ("pode ser areia 1 as 20 hrs") vale na hora, e o horário ou a duração ditos agora mandam sobre o que estava guardado.
  //    Com uma quadra já escolhida, um horário ou duração novos continuam nela. Número solto só vale como quadra depois de uma lista numerada.
- const askNow=parseTimeDuration(message),dayNow=String(search?.date??context.confirmedDate??'');
- const allCourts=aiConfigured()&&!context.pendingBooking&&dayNow&&!saysDate(message)?await db.select({id:courts.id,name:courts.name}).from(courts).where(and(eq(courts.companyId,company.id),eq(courts.active,true))).orderBy(asc(courts.name)):[];
+ const askNow=parseTimeDuration(message);
+ // Dia dito na mesma frase da quadra ("a society 1 amanhã às 19h"): vale esse dia (e começa uma busca nova).
+ const datedCourt=aiConfigured()&&!context.pendingBooking&&saysDate(message)&&(askNow.start||askNow.duration)?parseArenaDate(message,bot.timeZone,receivedAt).date:undefined;
+ const dayNow=String(datedCourt??search?.date??context.confirmedDate??'');
+ const allCourts=aiConfigured()&&!context.pendingBooking&&dayNow&&(!saysDate(message)||datedCourt)?await db.select({id:courts.id,name:courts.name}).from(courts).where(and(eq(courts.companyId,company.id),eq(courts.active,true))).orderBy(asc(courts.name)):[];
  const ordered=courtOptions.length?courtOptions.map(id=>allCourts.find(c=>c.id===id)).filter((c):c is {id:string;name:string}=>Boolean(c)):allCourts;
- const courtId=(allCourts.length?matchCourt(message,ordered,courtOptions.length>0):null)??(context.selectedCourtId&&(askNow.start||askNow.duration)?String(context.selectedCourtId):null),courtNow=courtId?allCourts.find(c=>c.id===courtId):undefined;
+ const courtId=(allCourts.length?matchCourt(message,ordered,courtOptions.length>0):null)??(!datedCourt&&context.selectedCourtId&&(askNow.start||askNow.duration)?String(context.selectedCourtId):null),courtNow=courtId?allCourts.find(c=>c.id===courtId):undefined;
  if(courtNow&&dayNow){
-  const maxDuration=await arenaMaxDuration(company.id),start=askNow.start??search?.start??null,duration=askNow.duration??search?.duration??null;
+  if(datedCourt&&datedCourt!==search?.date){delete context.search;delete context.courtOptions;delete context.timesShown;delete context.chosen;context.confirmedDate=datedCourt;}
+  const maxDuration=await arenaMaxDuration(company.id),start=askNow.start??(datedCourt?null:search?.start??null),duration=askNow.duration??(datedCourt?null:search?.duration??null);
   context.selectedCourtId=courtNow.id;context.selectedCourtName=courtNow.name;
   if(duration&&!validDuration(duration,maxDuration)){await reply_(`${durationError(maxDuration)} Qual duração você prefere?`);return;}
   if(start&&duration){await reply_(await proceedToBooking(courtNow,dayNow,start,duration));return;}
@@ -343,7 +361,10 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   await reply_(await askDuration({id:String(context.selectedCourtId),name:String(context.selectedCourtName||'')},search.date,timePick));return;
  }
  if(aiConfigured()&&!context.pendingBooking&&context.timesShown&&context.selectedCourtId&&search?.date&&search.duration&&timePick){
-  const court={id:String(context.selectedCourtId),name:String(context.selectedCourtName||'')},day=search.date,minutes=search.duration,free=await availability(company.id,court.id,day,minutes);
+  const court={id:String(context.selectedCourtId),name:String(context.selectedCourtName||'')},day=search.date,minutes=search.duration;
+  const pickIssue=await courtRuleIssue(court.id,day,timePick,minutes);
+  if(pickIssue){await reply_(`${pickIssue.text}\n\n${pickIssue.problem.kind==='start'?await availableTimesReply(company.id,court.id,day,minutes):await askDuration(court,day,timePick)}`);return;}
+  const free=await availability(company.id,court.id,day,minutes);
   if(free.slots.some(x=>x.inicio===timePick)){await reply_(await proceedToBooking(court,day,timePick,minutes));return;}
   await reply_(`${timeUnavailableText(timePick,reasonFor(day,timePick))}\n\n${await availableTimesReply(company.id,court.id,day,minutes)}`);return;
  }

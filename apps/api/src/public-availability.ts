@@ -1,27 +1,27 @@
 // Horários livres da página pública (sem banco, para poder testar isolado). Minutos desde 00:00.
-
-export type Busy = { start: number; end: number };
 import { DEFAULT_MAX_DURATION as MAX_DURATION, MIN_DURATION, STEP } from './booking-duration.js';
+import { DEFAULT_RULES, ruleProblem, type CourtRules } from './court-rules.js';
 
 export { MAX_DURATION, MIN_DURATION, STEP };
+export type Busy = { start: number; end: number };
 
 const free = (from: number, to: number, busy: readonly Busy[]) => !busy.some((b) => b.start < to && b.end > from);
 
-/** Inícios possíveis (de 30 em 30 min) com pelo menos 1h livre antes do fechamento e depois de `notBefore`. */
-export function freeStarts(open: number, close: number, notBefore: number, busy: readonly Busy[]) {
-  const out: number[] = [];
-  const first = Math.max(open, Math.ceil(notBefore / STEP) * STEP);
-  for (let t = first; t + MIN_DURATION <= close; t += STEP) if (free(t, t + MIN_DURATION, busy)) out.push(t);
-  return out;
-}
-
-/** Fins possíveis para um início: de 1h até 8h, parando no fechamento ou na próxima reserva. */
-export function endOptions(start: number, close: number, busy: readonly Busy[], maxDuration = MAX_DURATION) {
+/** Fins possíveis para um início: de 1h até o máximo, parando no fechamento ou na próxima reserva, e respeitando as regras da quadra. */
+export function endOptions(start: number, close: number, busy: readonly Busy[], maxDuration = MAX_DURATION, rules: CourtRules = DEFAULT_RULES, weekday = 0) {
   const out: number[] = [];
   for (let end = start + STEP; end <= Math.min(start + maxDuration, close); end += STEP) {
     if (!free(end - STEP, end, busy)) break;
-    if (end - start >= MIN_DURATION) out.push(end);
+    if (end - start >= MIN_DURATION && !ruleProblem(rules, weekday, start, end)) out.push(end);
   }
+  return out;
+}
+
+/** Inícios possíveis (de 30 em 30 ou só horas cheias, conforme a quadra) que têm pelo menos um fim válido. */
+export function freeStarts(open: number, close: number, notBefore: number, busy: readonly Busy[], rules: CourtRules = DEFAULT_RULES, weekday = 0, maxDuration = MAX_DURATION) {
+  const out: number[] = [], step = rules.step;
+  const first = Math.ceil(Math.max(open, notBefore) / step) * step;
+  for (let t = first; t + MIN_DURATION <= close; t += step) if (endOptions(t, close, busy, maxDuration, rules, weekday).length) out.push(t);
   return out;
 }
 

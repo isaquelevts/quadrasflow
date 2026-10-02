@@ -1,6 +1,6 @@
 import { useEffect, useState, type ComponentType, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarX2, Check, Clock, Copy, CopyCheck, CreditCard, ExternalLink, Image, LoaderCircle, MapPin, Plus, Store, Tags, X, type LucideProps } from 'lucide-react';
+import { CalendarX2, Check, Clock, Copy, Timer, Trash2, CopyCheck, CreditCard, ExternalLink, Image, LoaderCircle, MapPin, Plus, Store, Tags, X, type LucideProps } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/auth/AuthProvider';
 import { ArenaImagePicker } from '@/components/ArenaImagePicker';
@@ -17,12 +17,14 @@ import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
 import { durationLabel, errorMessage, formatCurrency } from '@/lib/format';
 import { cn } from '@/lib/utils';
+import { primeWhen, rulesOf, type CourtRules, type PrimeRule } from '@/lib/court-rules';
 
 type Hour = { weekday: number; is_open: boolean | number; open_time: string; close_time: string };
 type PriceDay = { weekday: number; morning: number; afternoon: number; evening: number };
 type Profile = { description: string; address: string; city: string; state: string; amenities: string[]; photos: string[] };
 type MpStatus = { connected: boolean; configured: boolean };
-type Section = 'perfil' | 'horarios' | 'precos' | 'cancelamento' | 'pagamentos';
+type Section = 'perfil' | 'horarios' | 'regras' | 'precos' | 'cancelamento' | 'pagamentos';
+type RuleCourt = { id: string; name: string; sport: string; active: number | boolean; rules: CourtRules };
 type RefundPolicy = 'always' | 'never' | 'team';
 type BookingPolicy = { refund: RefundPolicy; allowReschedule: boolean; rescheduleHours: number };
 
@@ -31,7 +33,7 @@ const ORDER = [1, 2, 3, 4, 5, 6, 0];
 const TIMES = Array.from({ length: 36 }, (_, i) => `${String(6 + Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`);
 const BANDS: Array<['morning' | 'afternoon' | 'evening', string]> = [['morning', 'Manhã · 08h–12h'], ['afternoon', 'Tarde · 12h–18h'], ['evening', 'Noite · 18h–23h']];
 const SUGGESTED = ['Estacionamento', 'Vestiário', 'Chuveiro', 'Bar', 'Wi-Fi', 'Iluminação', 'Aluguel de bolas', 'Arquibancada'];
-const SECTIONS: Array<[Section, string, ComponentType<LucideProps>]> = [['perfil', 'Perfil público', Store], ['horarios', 'Horários', Clock], ['precos', 'Preços', Tags], ['cancelamento', 'Cancelamento', CalendarX2], ['pagamentos', 'Pagamentos', CreditCard]];
+const SECTIONS: Array<[Section, string, ComponentType<LucideProps>]> = [['perfil', 'Perfil público', Store], ['horarios', 'Horários', Clock], ['regras', 'Regras de horário', Timer], ['precos', 'Preços', Tags], ['cancelamento', 'Cancelamento', CalendarX2], ['pagamentos', 'Pagamentos', CreditCard]];
 const REFUND_OPTIONS: Array<[RefundPolicy, string, string]> = [
   ['always', 'Sempre devolve', 'Cancelou, a equipe devolve o valor pago (Pix ou sinal), não importa a hora.'],
   ['never', 'Não devolve', 'O cliente pode cancelar e liberar o horário, mas o valor pago fica com a arena.'],
@@ -44,6 +46,7 @@ export function SettingsPage() {
   const [hours, setHours] = useState<Hour[]>([]);
   const [prices, setPrices] = useState<PriceDay[]>([]);
   const [maxDuration, setMaxDuration] = useState(480);
+  const [ruleCourts, setRuleCourts] = useState<RuleCourt[]>([]);
   const [policy, setPolicy] = useState<BookingPolicy>({ refund: 'team', allowReschedule: true, rescheduleHours: 24 });
   const [profile, setProfile] = useState<Profile>({ description: '', address: '', city: '', state: '', amenities: [], photos: [] });
   const [mp, setMp] = useState<MpStatus>({ connected: false, configured: false });
@@ -55,9 +58,10 @@ export function SettingsPage() {
   const publicUrl = user?.company?.slug ? `${window.location.origin}/a/${user.company.slug}` : '';
 
   useEffect(() => {
-    Promise.all([api<{ weeklyHours: Hour[]; maxDurationMinutes?: number; prices: PriceDay[]; profile: Profile }>('/api/arena/settings'), api<MpStatus>('/api/integrations/mercadopago'), api<BookingPolicy>('/api/arena/booking-policy')])
-      .then(([settings, payment, bookingPolicy]) => {
+    Promise.all([api<{ weeklyHours: Hour[]; maxDurationMinutes?: number; prices: PriceDay[]; profile: Profile }>('/api/arena/settings'), api<MpStatus>('/api/integrations/mercadopago'), api<BookingPolicy>('/api/arena/booking-policy'), api<{ courts: RuleCourt[] }>('/api/courts')])
+      .then(([settings, payment, bookingPolicy, courtList]) => {
         setPolicy(bookingPolicy);
+        setRuleCourts(courtList.courts.filter((c) => Boolean(c.active)).map((c) => ({ ...c, rules: rulesOf(c.rules) })));
         setHours(settings.weeklyHours.map((h) => ({ ...h, is_open: Boolean(h.is_open) })));
         setPrices(settings.prices);
         setMaxDuration(settings.maxDurationMinutes || 480);
@@ -66,6 +70,8 @@ export function SettingsPage() {
       })
       .catch((cause) => setError(errorMessage(cause)))
       .finally(() => setLoading(false));
+    // Atalho da tela de Quadras: /configuracoes?secao=regras
+    if (new URLSearchParams(window.location.search).get('secao') === 'regras') setSection('regras');
     // Volta do Mercado Pago: /configuracoes?mercadopago=conectado
     const status = new URLSearchParams(window.location.search).get('mercadopago');
     if (status) { setSection('pagamentos'); if (status === 'connected') toast.success('Mercado Pago conectado'); }
@@ -138,6 +144,11 @@ export function SettingsPage() {
             <Select value={String(maxDuration)} onValueChange={(v) => setMaxDuration(Number(v))}><SelectTrigger className="h-9 w-28 tabular-nums" aria-labelledby="duracao-maxima"><SelectValue /></SelectTrigger>
               <SelectContent>{DURATIONS.map((m) => <SelectItem key={m} value={String(m)}>{durationLabel(m)}</SelectItem>)}</SelectContent></Select>
           </div>
+        </Card>}
+
+        {section === 'regras' && <Card icon={Timer} title="Regras de horário" sub="Por quadra. Valem para a página pública e o WhatsApp; a equipe pode abrir exceções pelo painel.">
+          {ruleCourts.length ? ruleCourts.map((c) => <CourtRulesEditor key={c.id} court={c} onSaved={(rules) => setRuleCourts((list) => list.map((x) => x.id === c.id ? { ...x, rules } : x))} />)
+            : <p className="text-[13px] text-muted-foreground">Cadastre uma quadra para definir as regras de horário.</p>}
         </Card>}
 
         {section === 'precos' && <Card icon={Tags} title="Preços por faixa de horário" sub="Valor por hora em cada faixa. Reservas que cruzam faixas somam cada meia hora pelo preço da sua faixa."
@@ -216,4 +227,50 @@ function Amenities({ value, onChange }: { value: string[]; onChange: (value: str
       <Button type="button" variant="outline" onClick={() => add(draft)}><Plus /> Adicionar</Button></div>
     <div className="flex flex-wrap gap-1.5">{SUGGESTED.filter((s) => !value.includes(s)).slice(0, 6).map((s) => <button key={s} type="button" onClick={() => add(s)} className="rounded-md border border-dashed px-2 py-0.5 text-[12px] text-muted-foreground hover:border-brand-400 hover:text-brand-700">+ {s}</button>)}</div>
   </div>;
+}
+
+const WEEK = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+const RULE_TIMES = [...Array.from({ length: 48 }, (_, i) => `${String(Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`), '24:00'];
+const MINIMUMS = Array.from({ length: 15 }, (_, i) => 60 + i * 30);
+/** Regras de uma quadra: 30 em 30 x horas cheias e a lista de horários nobres. Cada quadra salva sozinha. */
+function CourtRulesEditor({ court, onSaved }: { court: RuleCourt; onSaved: (rules: CourtRules) => void }) {
+  const [rules, setRules] = useState<CourtRules>(court.rules);
+  const [saving, setSaving] = useState(false);
+  const changed = JSON.stringify(rules) !== JSON.stringify(court.rules);
+  const setPrime = (i: number, patch: Partial<PrimeRule>) => setRules((r) => ({ ...r, prime: r.prime.map((p, k) => k === i ? { ...p, ...patch } : p) }));
+  const minimums = MINIMUMS.filter((m) => rules.step === 30 || m % 60 === 0);
+  async function save() {
+    setSaving(true);
+    try { const result = await api<{ court: RuleCourt }>(`/api/courts/${court.id}/rules`, { method: 'PUT', body: JSON.stringify(rules) }); onSaved(rulesOf(result.court.rules)); setRules(rulesOf(result.court.rules)); toast.success(`Regras da ${court.name} salvas`); }
+    catch (cause) { toast.error(errorMessage(cause)); }
+    finally { setSaving(false); }
+  }
+  return <section className="space-y-3 rounded-lg border p-3 lg:p-4" aria-label={`Regras da ${court.name}`}>
+    <div className="flex flex-wrap items-baseline justify-between gap-2"><h3 className="font-semibold">{court.name} <span className="font-normal text-muted-foreground">· {court.sport}</span></h3>
+      {rules.prime.length > 0 && <span className="text-[12px] text-muted-foreground">{rules.prime.length} {rules.prime.length === 1 ? 'regra' : 'regras'} de horário nobre</span>}</div>
+    <div className="space-y-1.5"><div className="text-[13px] font-medium" id={`step-${court.id}`}>Horários de reserva</div>
+      <RadioGroup aria-labelledby={`step-${court.id}`} value={String(rules.step)} onValueChange={(v) => setRules((r) => ({ step: v === '60' ? 60 : 30, prime: v === '60' ? r.prime.map((p) => ({ ...p, minMinutes: Math.ceil(p.minMinutes / 60) * 60 })) : r.prime }))} className="grid gap-2 sm:grid-cols-2">
+        {([['30', 'De 30 em 30 minutos', 'Começa às 19:00 ou 19:30; dura 1h, 1h30, 2h…'], ['60', 'Só horas cheias', 'Começa às 19:00, 20:00…; dura 1h, 2h, 3h…']] as const).map(([value, title, text]) => <Label key={value} htmlFor={`step-${court.id}-${value}`} className={cn('flex cursor-pointer items-start gap-3 rounded-lg border p-3 font-normal leading-normal transition', String(rules.step) === value ? 'border-brand-500 bg-brand-50/60' : 'hover:bg-muted/40')}>
+          <RadioGroupItem id={`step-${court.id}-${value}`} value={value} className="mt-0.5" /><span className="space-y-0.5"><span className="block font-medium leading-snug">{title}</span><span className="block text-[12.5px] leading-snug text-muted-foreground">{text}</span></span></Label>)}
+      </RadioGroup></div>
+    <div className="space-y-2"><div className="text-[13px] font-medium">Horário nobre</div>
+      {rules.prime.length === 0 && <p className="text-[12.5px] text-muted-foreground">Sem regras. Ex.: de segunda a sexta, das 19h às 21h, só alugar a partir de 2h.</p>}
+      {rules.prime.map((p, i) => <div key={i} className="space-y-2 rounded-lg bg-muted/50 p-2.5">
+        <div className="flex flex-wrap gap-1" role="group" aria-label={`Dias da regra ${i + 1}`}>{WEEK.map((d, day) => { const on = p.days.includes(day); return <button key={d} type="button" aria-pressed={on} onClick={() => setPrime(i, { days: on ? p.days.filter((x) => x !== day) : [...p.days, day].sort() })} className={cn('h-8 min-w-11 rounded-md border px-2 text-[12.5px] font-medium transition', on ? 'border-brand-700 bg-brand-900 text-white' : 'bg-card text-muted-foreground hover:bg-muted')}>{d}</button>; })}</div>
+        <div className="flex flex-wrap items-center gap-2 text-[13px]">
+          <span className="text-muted-foreground">das</span><RuleSelect label={`Início da regra ${i + 1}`} value={p.from} options={RULE_TIMES.slice(0, -1)} onChange={(v) => setPrime(i, { from: v })} />
+          <span className="text-muted-foreground">às</span><RuleSelect label={`Fim da regra ${i + 1}`} value={p.to} options={RULE_TIMES.filter((t) => t > p.from)} onChange={(v) => setPrime(i, { to: v })} />
+          <span className="text-muted-foreground">mínimo</span><RuleSelect label={`Duração mínima da regra ${i + 1}`} value={String(p.minMinutes)} options={minimums.map(String)} format={(v) => durationLabel(Number(v))} onChange={(v) => setPrime(i, { minMinutes: Number(v) })} />
+          <Button type="button" variant="ghost" size="icon" className="ml-auto size-8 text-muted-foreground hover:text-rose-600" aria-label={`Remover regra ${i + 1}`} onClick={() => setRules((r) => ({ ...r, prime: r.prime.filter((_, k) => k !== i) }))}><Trash2 /></Button>
+        </div>
+        {p.days.length > 0 && p.to > p.from && <p className="text-[12px] text-muted-foreground">{primeWhen(p)}: reservas que pegarem esse horário precisam ter pelo menos {durationLabel(p.minMinutes)}.</p>}
+      </div>)}
+      {rules.prime.length < 10 && <Button type="button" variant="outline" size="sm" onClick={() => setRules((r) => ({ ...r, prime: [...r.prime, { days: [1, 2, 3, 4, 5], from: '19:00', to: '21:00', minMinutes: 120 }] }))}><Plus /> Adicionar horário nobre</Button>}
+    </div>
+    <div className="flex justify-end"><Button disabled={!changed || saving} onClick={() => void save()}>{saving ? <LoaderCircle className="animate-spin" /> : <Check />}Salvar {court.name}</Button></div>
+  </section>;
+}
+function RuleSelect({ label, value, options, onChange, format = (v: string) => v }: { label: string; value: string; options: string[]; onChange: (value: string) => void; format?: (value: string) => string }) {
+  const list = options.includes(value) ? options : [value, ...options];
+  return <Select value={value} onValueChange={onChange}><SelectTrigger className="h-9 w-24 tabular-nums" aria-label={label}><SelectValue /></SelectTrigger><SelectContent>{list.map((t) => <SelectItem key={t} value={t}>{format(t)}</SelectItem>)}</SelectContent></Select>;
 }

@@ -6,6 +6,7 @@ import { db } from './database.js';
 import { isUniqueViolation } from './db-errors.js';
 import type { AuthUser } from './auth.js';
 import { bookingAmountCents } from './pricing.js';
+import { parseCourtRules, validateCourtRules } from './court-rules.js';
 import { maxDurationOf, validMaxDuration } from './booking-duration.js';
 import { findMonthlyConflict, monthlyConflictMessage } from './monthly-conflict.js';
 import { changeBookingStatus, syncBookingReceivable, type BookingStatus } from './booking-finance.js';
@@ -32,7 +33,7 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function emailOf(value: unknown) { const email = String(value ?? '').trim().toLowerCase(); if (!email) return null; if (email.length > 200 || !EMAIL.test(email)) throw fail(400, 'Informe um e-mail válido.'); return email; }
 /** Telefone comparável: só dígitos e sem o 55 do Brasil. */
 const phoneKey = (value: string | null | undefined) => (value || '').replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '');
-function toCourt(row: typeof courts.$inferSelect) { return { id: row.id, name: row.name, sport: row.sport, price_cents: row.priceCents, photo_url: row.photoUrl, active: row.active ? 1 : 0 }; }
+function toCourt(row: typeof courts.$inferSelect) { return { id: row.id, name: row.name, sport: row.sport, price_cents: row.priceCents, photo_url: row.photoUrl, active: row.active ? 1 : 0, rules: parseCourtRules(row.bookingRules) }; }
 function toHour(row: typeof companyHours.$inferSelect) { return { weekday: row.weekday, is_open: row.isOpen ? 1 : 0, open_time: row.openTime, close_time: row.closeTime }; }
 async function audit(companyId: string, userId: string, action: string, entity: string, entityId?: string, details: Record<string, unknown> = {}) { await db.insert(appAudit).values({ id: randomUUID(), companyId, userId, action, entity, entityId: entityId || null, details, createdAt: new Date().toISOString() }); }
 async function getCompanyHours(companyId: string) { return db.select().from(companyHours).where(eq(companyHours.companyId, companyId)).orderBy(asc(companyHours.weekday)); }
@@ -129,10 +130,19 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const photoUrl = String(body.photoUrl || '');
     const photoFolder = createHash('sha256').update(companyId).digest('hex').slice(0, 32);
     if (photoUrl && !new RegExp(`^/api/arena/media/${photoFolder}/[a-f0-9-]{36}\\.webp$`).test(photoUrl)) throw fail(400, 'Envie uma foto da quadra pela galeria de imagens.');
-    const row = { id: randomUUID(), companyId, name, sport, priceCents, photoUrl: photoUrl || null, photos: photoUrl ? [photoUrl] : [], surface: '', covering: '', players: 0, sports: [sport], active: true, createdAt: new Date().toISOString() };
+    const row = { id: randomUUID(), companyId, name, sport, priceCents, photoUrl: photoUrl || null, photos: photoUrl ? [photoUrl] : [], surface: '', covering: '', players: 0, sports: [sport], active: true, bookingRules: {}, createdAt: new Date().toISOString() };
     try { await db.insert(courts).values(row); } catch (cause) { if (isUniqueViolation(cause)) throw fail(409, 'Já existe uma quadra com esse nome.'); throw cause; }
     await audit(companyId, user.id, 'court.created', 'court', row.id);
     return reply.code(201).send({ court: toCourt(row) });
+  });
+  // Regras de horário da quadra (Configurações → Regras de horário): 30 em 30 ou só horas cheias, e horário nobre.
+  app.put<{ Params: { id: string } }>('/api/courts/:id/rules', auth, async (request) => {
+    const user = adminOf(request), companyId = companyOf(request), checked = validateCourtRules(bodyOf(request));
+    if ('error' in checked) throw fail(400, checked.error);
+    const rows = await db.update(courts).set({ bookingRules: checked.rules }).where(and(eq(courts.id, request.params.id), eq(courts.companyId, companyId))).returning();
+    if (!rows[0]) throw fail(404, 'Quadra não encontrada.');
+    await audit(companyId, user.id, 'court.rules_updated', 'court', request.params.id, checked.rules);
+    return { court: toCourt(rows[0]) };
   });
   app.put<{ Params: { id: string } }>('/api/courts/:id', auth, async (request) => {
     const user = adminOf(request), companyId = companyOf(request), body = bodyOf(request), { id } = request.params;

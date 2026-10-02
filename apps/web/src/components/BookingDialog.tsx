@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
 import { fetchDay, fmtDate, openWindow, todayKey, type Court, type DayData, type HoursDay } from '@/lib/arena';
+import { rulesOf, ruleProblem, ruleProblemText } from '@/lib/court-rules';
 import { errorMessage, formatPhone, formatTime, minutesOf, minutesOfTime, timeOfMinutes } from '@/lib/format';
 
 type EditableBooking = { id: string; customer_name: string; customer_phone?: string | null; start_at: string; end_at: string; court_id: string };
@@ -78,8 +79,11 @@ export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initial
     // Horário fixo de mensalista bloqueia como qualquer outra reserva (mesma regra da API e do bot).
     if (monthlyHit && !isBlock) return { hard: true, text: `Conflito com o horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
     if (monthlyHit) return { hard: false, text: `Atenção: este bloqueio cobre o horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
+    // Regra da quadra (horas cheias, horário nobre): a equipe pode abrir exceção, só avisa.
+    const court = courts.find((c) => c.id === courtId), problem = !isBlock && court ? ruleProblem(rulesOf(court.rules), new Date(`${date}T12:00:00Z`).getUTCDay(), start, end) : null;
+    if (problem && court) return { hard: false, text: `Fora da regra da quadra: ${ruleProblemText(problem, court.name)} Você pode salvar mesmo assim.` };
     return null;
-  }, [day, courtId, start, end, booking?.id, isBlock]);
+  }, [day, courtId, start, end, booking?.id, isBlock, courts, date]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError('');

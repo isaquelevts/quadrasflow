@@ -1,9 +1,10 @@
+import type { CourtRules } from '@/lib/court-rules';
 import { addDays, format, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { api } from '@/lib/api';
 import { minutesOf, minutesOfTime } from '@/lib/format';
 
-export type Court = { id: string; name: string; sport: string; price_cents: number; photo_url?: string | null; active?: number | boolean };
+export type Court = { id: string; name: string; sport: string; price_cents: number; photo_url?: string | null; active?: number | boolean; rules?: CourtRules };
 export type HoursDay = { weekday: number; is_open: boolean | number; open_time: string; close_time: string };
 export type DayBooking = { id: string; customer_name: string; customer_phone?: string | null; start_at: string; end_at: string; amount_cents: number; status: string; source?: string; court_name: string; court_id: string; sport: string };
 export type Block = { id: string; reason: string; start_at: string; end_at: string; court_name: string; court_id: string };

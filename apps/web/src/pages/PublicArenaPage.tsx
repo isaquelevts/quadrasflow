@@ -12,8 +12,9 @@ import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
 import { durationLabel, errorMessage, formatCurrency, formatDate, initials, whatsappLink } from '@/lib/format';
 import { cn } from '@/lib/utils';
+import { rulesOf, ruleProblem, ruleProblemText, type CourtRules } from '@/lib/court-rules';
 
-type Court = { id: string; name: string; sport: string; price_cents: number; photo_url: string | null };
+type Court = { id: string; name: string; sport: string; price_cents: number; photo_url: string | null; rules?: CourtRules };
 type Busy = { court_id: string; start_at: string; end_at: string };
 type PriceSlot = { weekday: number; start_time: string; end_time: string; price_cents: number };
 type Arena = { name: string; slug: string; description: string; address: string; city: string; state: string; amenities: string[]; photos: string[]; logo_url: string; whatsapp?: string };
@@ -96,18 +97,22 @@ function BookingPage({ slug }: { slug: string }) {
   const busyFor = useCallback((id: string) => (data ? [...data.bookings, ...data.blocks].filter((b) => b.court_id === id && b.start_at.slice(0, 10) === date).map((b) => ({ start: toMin(b.start_at.slice(11, 16)), end: toMin(b.end_at.slice(11, 16)) })) : []), [data, date]);
   const open = data && data.hours.is_open ? toMin(data.hours.open_time) : 0, close = data && data.hours.is_open ? toMin(data.hours.close_time) : 0;
   const notBefore = data && date === today ? toMin(data.not_before) : 0;
+  const maxDuration = data?.max_duration_minutes || 480;
+  const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
+  const rulesFor = useCallback((id: string) => rulesOf(data?.courts.find((c) => c.id === id)?.rules), [data]);
+  // Fins válidos: livres até ali e dentro das regras da quadra (só horas cheias, mínimo no horário nobre).
+  const endsFor = useCallback((id: string, s: number) => {
+    const busy = busyFor(id), rules = rulesFor(id), out: number[] = [];
+    for (let e = s + STEP; e <= Math.min(s + maxDuration, close); e += STEP) { if (overlaps(busy, e - STEP, e)) break; if (e - s >= MIN_DURATION && !ruleProblem(rules, weekday, s, e)) out.push(e); }
+    return out;
+  }, [busyFor, rulesFor, close, maxDuration, weekday]);
+  // Inícios: de 30 em 30 ou só horas cheias, e só os que têm pelo menos um fim válido.
   const startsFor = useCallback((id: string) => {
     if (!data?.hours.is_open) return [] as number[];
-    const busy = busyFor(id), out: number[] = [];
-    for (let t = Math.max(open, notBefore); t + MIN_DURATION <= close; t += STEP) if (!overlaps(busy, t, t + MIN_DURATION)) out.push(t);
+    const step = rulesFor(id).step, out: number[] = [];
+    for (let t = Math.ceil(Math.max(open, notBefore) / step) * step; t + MIN_DURATION <= close; t += step) if (endsFor(id, t).length) out.push(t);
     return out;
-  }, [data, busyFor, open, close, notBefore]);
-  const maxDuration = data?.max_duration_minutes || 480;
-  const endsFor = useCallback((id: string, s: number) => {
-    const busy = busyFor(id), out: number[] = [];
-    for (let e = s + STEP; e <= Math.min(s + maxDuration, close); e += STEP) { if (overlaps(busy, e - STEP, e)) break; if (e - s >= MIN_DURATION) out.push(e); }
-    return out;
-  }, [busyFor, close, maxDuration]);
+  }, [data, rulesFor, endsFor, open, close, notBefore]);
   // Preço real: faixas de preço da arena por meia hora (a noite pode custar diferente).
   const priceOf = useCallback((c: Court, s: number, e: number) => {
     const weekday = new Date(`${date}T12:00:00Z`).getUTCDay(); let total = 0;
@@ -255,7 +260,7 @@ function BookingPage({ slug }: { slug: string }) {
             <div className="space-y-4">
               {([['Manhã', Sunrise, 0, 720], ['Tarde', Sun, 720, 1080], ['Noite', Moon, 1080, 1440]] as const).map(([label, Icon, a, b]) => {
                 // Só inícios que ainda podem acontecer (não passados e com 1h antes de fechar); riscado = ocupado.
-                const starts = startsFor(courtId), slots: number[] = []; for (let t = Math.max(a, open, notBefore); t < b && t + MIN_DURATION <= close; t += STEP) slots.push(t);
+                const starts = startsFor(courtId), step = rulesFor(courtId).step, slots: number[] = []; for (let t = Math.ceil(Math.max(a, open, notBefore) / step) * step; t < b && t + MIN_DURATION <= close; t += step) slots.push(t);
                 if (!slots.length) return null;
                 if (!slots.some((t) => starts.includes(t))) return <div key={label} className="flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground/60 uppercase"><Icon className="size-3.5" aria-hidden="true" />{label} · sem horários</div>;
                 return <div key={label}><div className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground uppercase"><Icon className="size-3.5" aria-hidden="true" />{label}</div>
@@ -269,6 +274,9 @@ function BookingPage({ slug }: { slug: string }) {
             {court && start !== null && (() => {
               const ends = endsFor(court.id, start), last = ends.at(-1) ?? start, cut = start + maxDuration > last;
               const why = !cut ? '' : last >= close ? `A arena fecha às ${hm(close)}.` : `A quadra está reservada a partir das ${hm(last)}.`;
+              // Regra da quadra que explica por que não há 1h (ou 1h30) para esse início.
+              const rules = rulesFor(court.id), shortest = ruleProblem(rules, weekday, start, start + 60) ?? ruleProblem(rules, weekday, start, start + 90);
+              const ruleNote = shortest ? ruleProblemText(shortest, court.name) : '';
               return <>
                 <div className="-mx-4 flex snap-x gap-2 overflow-x-auto px-4 pb-1 [scrollbar-width:none] lg:mx-0 lg:grid lg:grid-cols-4 lg:px-0" role="radiogroup" aria-label="Horário de fim">
                   {ends.map((e) => { const sel = end === e; return <button key={e} type="button" role="radio" aria-checked={sel} onClick={() => pickEnd(e)} className={cn('w-[104px] shrink-0 snap-start rounded-2xl border-2 px-3 py-2.5 text-left transition active:scale-95 lg:w-auto', sel ? 'border-brand-900 bg-brand-900 text-white shadow-md' : 'border-border bg-white hover:border-brand-500')}>
@@ -277,6 +285,7 @@ function BookingPage({ slug }: { slug: string }) {
                     <div className={cn('text-[11.5px] tabular-nums', sel ? 'text-white/70' : 'text-muted-foreground')}>{brl(priceOf(court, start, e))}</div>
                   </button>; })}
                 </div>
+                {ruleNote && <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-amber-50 px-2.5 py-2 text-[12.5px] text-amber-900"><Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{ruleNote}</p>}
                 {why ? <p className="mt-2 flex items-center gap-1.5 text-[12.5px] text-muted-foreground"><Info className="size-3.5" aria-hidden="true" />{why}</p>
                   : ends.length > 3 && <p className="mt-2 flex items-center gap-1.5 text-[12.5px] text-muted-foreground lg:hidden"><MoveHorizontal className="size-3.5" aria-hidden="true" />Arraste para ver até {durationLabel(last - start)} de jogo</p>}
               </>;

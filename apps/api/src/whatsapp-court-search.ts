@@ -36,10 +36,10 @@ export async function searchFreeCourts(courts: readonly SearchCourt[], day: stri
     }
     if (start) {
       const duracoes: Array<{ minutos: Duration; valor: string; amountCents: number }> = [];
-      // Se não cabe por X minutos a partir desse início, não cabe por mais tempo: para na primeira que não cabe.
       for (const minutos of durationChoices(maxDuration)) {
         const slot = (await check(court.id, day, minutos)).slots.find((s) => s.inicio === start);
-        if (!slot) break;
+        // Sem parar no primeiro "não": regras da quadra (horas cheias, horário nobre) podem barrar 1h e liberar 2h.
+        if (!slot) continue;
         duracoes.push({ minutos, valor: slot.valor, amountCents: slot.amountCents });
       }
       return duracoes.length ? { ...court, mode: 'inicio', duracoes } : null;
