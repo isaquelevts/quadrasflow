@@ -58,8 +58,9 @@ test('preço: valor único, faixa e dia específico', () => {
 test('período do dia e pedido de horários', () => {
   const cases: Array<[string, string | null]> = [['Quais horários vocês têm amanhã à noite?', 'noite'], ['de manhã', 'manha'], ['hoje à tarde', 'tarde'], ['Boa noite, quero reservar amanhã', null], ['boa tarde', null], ['e de noite?', 'noite']];
   for (const [text, expected] of cases) assert.equal(parsePeriod(text), expected, text);
-  for (const t of ['Quais horários vocês têm amanhã à noite?', 'quais horários tem hoje?', 'tem horário livre amanhã?', 'que horas tem sábado', 'tem quadra livre hoje?', 'horários disponíveis amanhã']) assert.equal(isTimesQuestion(t), true, t);
-  for (const t of ['tem horario as 19 hoje', 'quero reservar amanhã', 'qual o status da minha reserva?', 'quanto custa', 'oi', 'quero jogar às 20h']) assert.equal(isTimesQuestion(t), false, t);
+  for (const t of ['Quais horários vocês têm amanhã à noite?', 'quais horários tem hoje?', 'tem horário livre amanhã?', 'que horas tem sábado', 'tem quadra livre hoje?', 'horários disponíveis amanhã',
+    'tem reserva disponivel amanha?', 'quais disponiveis amanha?', 'tem disponível amanhã?', 'o que tem livre amanhã?', 'tem vaga amanhã?', 'quais estão livres hoje?', 'quais tem pra sábado?', 'disponibilidade de amanhã']) assert.equal(isTimesQuestion(t), true, t);
+  for (const t of ['tem horario as 19 hoje', 'quero reservar amanhã', 'qual o status da minha reserva?', 'quanto custa', 'oi', 'quero jogar às 20h', 'a society 2 está livre às 20h?', 'quero remarcar para um horário livre', 'qual o valor amanhã?', 'quais as minhas reservas?']) assert.equal(isTimesQuestion(t), false, t);
   assert.equal(isPeriodOnly('e à noite?'), true); assert.equal(isPeriodOnly('de manhã'), true); assert.equal(isPeriodOnly('quero reservar amanhã à noite com meus amigos do trabalho'), false);
 });
 

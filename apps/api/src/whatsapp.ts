@@ -277,6 +277,8 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
    if(isGreeting(message)&&!context.confirmedDate){context.menu=true;return welcomeMenu(company.name,bot.welcome);}
    // Dia já escolhido e o cliente pede para ver os horários (ou só "e à noite?"): horários por quadra primeiro.
    if(context.confirmedDate&&(isPeriodOnly(message)||(isTimesQuestion(message)&&!saysDate(message))))return dayScheduleReply(agentDeps,company.id,context,String(context.confirmedDate),parsePeriod(message));
+   // Pedido de horários já com o dia ("quais disponíveis amanhã?", "tem vaga sábado?"): horários por quadra direto, sem depender da IA.
+   if(isTimesQuestion(message)&&saysDate(message)){const parsed=parseArenaDate(message,bot.timeZone,receivedAt);if(parsed.date)return dayScheduleReply(agentDeps,company.id,context,parsed.date,parsePeriod(message));if(parsed.question)return parsed.question;}
    if(menuChoice==='1'&&!context.confirmedDate)return DATE_QUESTION;
    if(isReserveIntent(message)&&!context.confirmedDate)return DATE_QUESTION;
    if(isPriceQuestion(message)){context.priceAsked=true;return priceReply(company.id,context.confirmedDate?String(context.confirmedDate):undefined);}

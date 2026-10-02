@@ -120,10 +120,14 @@ export function parsePeriod(text: string): Period | null {
   return null;
 }
 /** Pedido de ver os horários ("quais horários vocês têm amanhã?"), sem um horário específico. */
+/** Pedido para ver os horários ("quais horários vocês têm amanhã?", "tem reserva disponível amanhã?", "quais disponíveis?"), sem um horário específico. */
 export const isTimesQuestion = (text: string) => {
   const t = norm(text);
-  if (t.length > 120 || TIME_WORDS.test(t) || /\b(cancel|minha reserva|pix|pagamento)\b/.test(t)) return false;
-  return /\b(quais|qual|que)\b.*\b(horarios?|horas)\b/.test(t) || /\b(horarios?|vagas?|quadras?)\b.*\b(livres?|disponiveis|disponivel|vagos?)\b/.test(t) || /\btem\b.*\b(horarios?|vagas?)\b/.test(t) || /\bque horas\b/.test(t);
+  if (t.length > 120 || TIME_WORDS.test(t) || /\b(cancel|minha reserva|minhas reservas|pix|pagamento|remarc|reagend|endereco|valor|preco|quanto)/.test(t)) return false;
+  return /\b(quais|qual|que)\b.*\b(horarios?|horas)\b/.test(t)
+    || /\b(livres?|disponiveis|disponivel|disponibilidade|vagos?|vagas?|desocupad[ao]s?)\b/.test(t)
+    || /\btem\b.*\b(horarios?|vagas?)\b/.test(t) || /\bque horas\b/.test(t)
+    || (DATE_WORDS.test(t) && /\b(quais|o que tem|que tem|oque tem|o que voces tem|tem algo|tem alguma coisa)\b/.test(t));
 };
 /** Só o período ("e à noite?", "de manhã"): pede outra faixa do mesmo dia. */
 export const isPeriodOnly = (text: string) => norm(text).length <= 25 && parsePeriod(text) !== null;
