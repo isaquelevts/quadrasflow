@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isRescheduleIntent, rescheduleSummary, rescheduledText, isCancelIntent, pickBooking, isAllCourts, isPhotoRequest, photoQuestion, photosOutcome, askDurationText, courtPriceRange, dayScheduleMessage, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, noCourtsMessage, parseBareTime, parsePeriod, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
+import { isRescheduleIntent, rescheduleSummary, rescheduledText, isCancelIntent, pickBooking, isAllCourts, isPhotoRequest, photoQuestion, photosOutcome, endOptionsText, parseEndAnswer, courtPriceRange, dayScheduleMessage, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, noCourtsMessage, parseBareTime, parsePeriod, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
 
 test('horário solto depois da lista', () => {
   const cases: Array<[string, string | null]> = [['20', '20:00'], ['20h', '20:00'], ['às 20', '20:00'], ['as 17', '17:00'], ['20:30', '20:30'], ['20h30', '20:30'], ['21 horas', '21:00'], ['pode ser 20', null],
@@ -32,10 +32,20 @@ test('intenções claras', () => {
   for (const t of ['oi, tem horário hoje?', 'quero reservar']) assert.equal(isGreeting(t), false, t);
 });
 
-test('pergunta de duração sem repetir nem soar robô', () => {
-  assert.equal(askDurationText('Society 1', '19:00', [60, 90, 120, 150, 180, 210, 240]), '⏱️ Na Society 1, às 19:00, dá para jogar de 1h até 4h. Qual duração você prefere?');
-  assert.equal(askDurationText('Areia 1', '21:00', [60, 90]), '⏱️ Na Areia 1, às 21:00, dá para jogar 1h ou 1h30. Qual duração você prefere?');
-  assert.match(timeUnavailableText('20:00', 'ocupado'), /Às 20:00 a quadra já está reservada/);
+test('lista de até que horas, com preço (no máximo 8 e aviso de mais tempo)', () => {
+  const opts = (step: number, n: number) => Array.from({ length: n }, (_, k) => ({ minutes: 60 + k * step, amountCents: 10000 + k * 5000 * step / 30 }));
+  assert.equal(endOptionsText('Areia 1', '10:00', opts(30, 3)), '⏱️ Areia 1, a partir das 10:00:\n\n10h00 – 11h00 (R$ 100)\n10h00 – 11h30 (R$ 150)\n10h00 – 12h00 (R$ 200)\n\nAté que horas você quer jogar?');
+  const many = endOptionsText('Areia 1', '10:00', opts(30, 15));
+  assert.equal(many.split('\n').filter((l) => l.startsWith('10h00 –')).length, 8, 'no máximo 8 opções');
+  assert.match(many, /Dá para jogar mais tempo também \(até 18h00\): é só me dizer até que horas\./);
+  assert.match(endOptionsText('Society 1', '19:00', opts(60, 3)), /19h00 – 20h00 \(R\$ 100\)\n19h00 – 21h00 \(R\$ 200\)\n19h00 – 22h00 \(R\$ 300\)/);
+  assert.doesNotMatch(endOptionsText('Society 1', '19:00', opts(60, 3)), /mais tempo/);
+  assert.equal(timeUnavailableText('20:00', 'ocupado'), 'Às 20:00 a quadra já está reservada. 😕');
+});
+test('resposta à lista: horário final ou intervalo', () => {
+  const cases: Array<[string, number | null]> = [['12h', 120], ['até 12h', 120], ['ate as 11:30', 90], ['12', 120], ['10 às 12', 120], ['das 10h às 11h30', 90], ['pode ser 11h', 60], ['11h30', 90],
+    ['2 horas', null], ['1 hora', null], ['3h', null], ['9h', null], ['das 11 às 12', null], ['areia 1', null], ['sim', null]];
+  for (const [text, expected] of cases) assert.equal(parseEndAnswer(text, '10:00'), expected, text);
 });
 
 const tariffs = [

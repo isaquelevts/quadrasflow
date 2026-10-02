@@ -26,14 +26,14 @@ test('só duração: quadras com algum horário livre dessa duração', async ()
 test('só horário: quadras livres naquele início, com as durações possíveis', async () => {
   const list = await searchFreeCourts(courts, '2026-09-30', '20:00', null, check);
   assert.deepEqual(list.map((c) => c.name), ['Areia 1']);
-  assert.match(freeCourtsMessage('quarta-feira, 30/09/2026', '20:00', null, list), /livres às 20:00[\s\S]*Areia 1 · Vôlei \(1h, 1h30, 2h\)/);
+  assert.match(freeCourtsMessage('quarta-feira, 30/09/2026', '20:00', null, list), /livres às 20:00[\s\S]*1️⃣ Areia 1 · Vôlei\n\nQual quadra você prefere\? Envie o número ou o nome\./);
 });
 test('só horário com máximo maior: mostra a faixa das durações que cabem', async () => {
   const long = { a: { 60: [slot('18:00', 10000)], 90: [slot('18:00', 15000)], 120: [slot('18:00', 20000)], 150: [slot('18:00', 25000)], 180: [slot('18:00', 30000)] } } as Record<string, Record<number, SearchSlot[]>>;
   const asked: number[] = [];
   const list = await searchFreeCourts([courts[0]!], '2026-09-30', '18:00', null, async (id, _d, m) => { asked.push(m); return { slots: long[id]![m] ?? [] }; }, 480);
-  assert.equal(asked.length, 15, 'olha todas as durações (regras podem barrar 1h e liberar 2h)');
-  assert.match(freeCourtsMessage('quarta-feira, 30/09/2026', '18:00', null, list), /Areia 1 · Vôlei \(de 1h a 3h\)/);
+  assert.deepEqual(asked, [60], 'basta a primeira duração que cabe para a quadra entrar na lista');
+  assert.match(freeCourtsMessage('quarta-feira, 30/09/2026', '18:00', null, list), /1️⃣ Areia 1 · Vôlei\n/);
 });
 test('nenhuma livre: oferece outro horário ou dia', async () => {
   const list = await searchFreeCourts(courts, '2026-09-30', '23:00', 60, check);

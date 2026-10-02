@@ -70,12 +70,27 @@ export function matchCourt(text: string, courts: ReadonlyArray<{ id: string; nam
   return hits.length === 1 ? hits[0]!.id : null;
 }
 
-/** Só o horário é conhecido: pergunta a duração mostrando o que cabe naquela quadra. */
-export function askDurationText(court: string, start: string, durations: readonly number[]) {
-  const labels = durations.map(durationLabel);
-  const hourly = durations.every((d) => d % 60 === 0);
-  const fits = labels.length > 3 ? `de ${labels[0]} até ${labels.at(-1)}${hourly ? ', em horas cheias' : ''}` : joinOu(labels);
-  return `⏱️ Na ${court}, às ${start}, dá para jogar ${fits}. Qual duração você prefere?`;
+export const MAX_END_OPTIONS = 8;
+const clockText = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}h${String(min % 60).padStart(2, '0')}`;
+/**
+ * Só o horário de início é conhecido (e a quadra escolhida): mostra até onde dá para jogar, com o preço.
+ * "10h00 – 11h00 (R$ 100)". Até 8 opções; se couber mais tempo, avisa.
+ */
+export function endOptionsText(court: string, start: string, options: ReadonlyArray<{ minutes: number; amountCents: number }>) {
+  const s0 = Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5)), shown = options.slice(0, MAX_END_OPTIONS);
+  const lines = shown.map((o) => `${clockText(s0)} – ${clockText(s0 + o.minutes)} (${brlShort(o.amountCents)})`);
+  const more = options.length > shown.length ? `\n\nDá para jogar mais tempo também (até ${clockText(s0 + options.at(-1)!.minutes)}): é só me dizer até que horas.` : '';
+  return `⏱️ ${court}, a partir das ${start}:\n\n${lines.join('\n')}${more}\n\nAté que horas você quer jogar?`;
+}
+/** Resposta à lista de fins: "12h", "até 12h", "12", "10 às 12", "das 10h às 11h30" → minutos de jogo a partir do início (ou null). */
+export function parseEndAnswer(text: string, start: string): number | null {
+  const t = norm(text).replace(/^(?:pode ser |vou querer |quero |entao |então )/, '').trim();
+  const s0 = Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5));
+  const range = t.match(/^(?:das?\s*)?(\d{1,2})(?:[:h](\d{2}))?\s*h?\s*(?:as|a|ate|-|–)\s*(?:as\s*)?(\d{1,2})(?:[:h](\d{2}))?\s*h?$/);
+  const end = range ? Number(range[3]) * 60 + Number(range[4] || 0) : (() => { const m = t.match(/^(?:ate\s*(?:as\s*)?|as\s*)?(\d{1,2})(?:[:h](\d{2}))?\s*(?:h|hs|horas?)?$/); return m ? Number(m[1]) * 60 + Number(m[2] || 0) : null; })();
+  if (range && Number(range[1]) * 60 + Number(range[2] || 0) !== s0) return null;
+  if (end === null || end <= s0 || end > 24 * 60) return null;
+  return end - s0;
 }
 
 /** Horário escolhido que não dá certo: diz o motivo antes da lista de horários livres. */

@@ -14,7 +14,7 @@ import { activeCourts, confirmPendingBooking, saveClientEmail, dayScheduleReply,
 import { durationLabel, parseTimeDuration, type Duration } from './whatsapp-court-search.js';
 import { testPhoneMatches } from './whatsapp-test-mode.js';
 import { parseCourtRules, ruleProblem, ruleProblemText } from './court-rules.js';
-import { DATE_QUESTION, NAME_QUESTION, askDurationText, isAllCourts, isCancelIntent, isRescheduleIntent, rescheduleSummary, rescheduledText, pickBooking, type BookingOption, isGreeting, isPhotoRequest, photoQuestion, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
+import { DATE_QUESTION, NAME_QUESTION, endOptionsText, parseEndAnswer, isAllCourts, isCancelIntent, isRescheduleIntent, rescheduleSummary, rescheduledText, pickBooking, type BookingOption, isGreeting, isPhotoRequest, photoQuestion, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
 import { durationChoices, durationError, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { confirmsCancellation, confirmsSummary } from './whatsapp-confirm.js';
 import { isSimulating, runSimulation, simulationNote, simulatorPhone, SIMULATOR_PREFIX } from './whatsapp-simulation.js';
@@ -324,8 +324,8 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  /** Só o horário é conhecido: pergunta a duração (as que cabem naquela quadra) ou, se não cabe, mostra os horários livres dela. */
  const askDuration=async(court:{id:string;name:string},day:string,start:string):Promise<string>=>{
   // Regras da quadra (horas cheias, horário nobre) só tiram algumas durações; ocupação para na primeira que não cabe.
-  const fits:number[]=[];for(const minutes of durationChoices(await arenaMaxDuration(company.id))){if(await courtRuleIssue(court.id,day,start,minutes))continue;const free=await availability(company.id,court.id,day,minutes);if(!free.slots.some(x=>x.inicio===start))break;fits.push(minutes);}
-  if(fits.length){delete context.timesShown;context.search={date:day,start,duration:null};return askDurationText(court.name,start,fits);}
+  const fits:Array<{minutes:number;amountCents:number}>=[];for(const minutes of durationChoices(await arenaMaxDuration(company.id))){if(await courtRuleIssue(court.id,day,start,minutes))continue;const slot=(await availability(company.id,court.id,day,minutes)).slots.find(x=>x.inicio===start);if(!slot)break;fits.push({minutes,amountCents:slot.amountCents});}
+  if(fits.length){delete context.timesShown;context.search={date:day,start,duration:null};return endOptionsText(court.name,start,fits);}
   // Nenhuma duração cabe: se é por regra da quadra (ex.: 19h30 numa quadra de horas cheias), diz a regra, não "ocupado".
   const startIssue=await courtRuleIssue(court.id,day,start,60);
   context.timesShown=true;context.search={date:day,start:null,duration:60};return `${startIssue?.problem.kind==='start'?startIssue.text:timeUnavailableText(start,reasonFor(day,start))}\n\n${await availableTimesReply(company.id,court.id,day,60)}`;
@@ -338,7 +338,7 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  const dayNow=String(datedCourt??search?.date??context.confirmedDate??'');
  const allCourts=aiConfigured()&&!context.pendingBooking&&dayNow&&(!saysDate(message)||datedCourt)?await db.select({id:courts.id,name:courts.name}).from(courts).where(and(eq(courts.companyId,company.id),eq(courts.active,true))).orderBy(asc(courts.name)):[];
  const ordered=courtOptions.length?courtOptions.map(id=>allCourts.find(c=>c.id===id)).filter((c):c is {id:string;name:string}=>Boolean(c)):allCourts;
- const courtId=(allCourts.length?matchCourt(message,ordered,courtOptions.length>0):null)??(!datedCourt&&context.selectedCourtId&&(askNow.start||askNow.duration)?String(context.selectedCourtId):null),courtNow=courtId?allCourts.find(c=>c.id===courtId):undefined;
+ const courtId=(allCourts.length?matchCourt(message,ordered,courtOptions.length>0):null)??(!datedCourt&&context.selectedCourtId&&(askNow.start||askNow.duration)&&!(search?.start&&!search.duration&&parseEndAnswer(message,search.start))/* "até 12h" responde à lista de fins */?String(context.selectedCourtId):null),courtNow=courtId?allCourts.find(c=>c.id===courtId):undefined;
  if(courtNow&&dayNow){
   if(datedCourt&&datedCourt!==search?.date){delete context.search;delete context.courtOptions;delete context.timesShown;delete context.chosen;context.confirmedDate=datedCourt;}
   const maxDuration=await arenaMaxDuration(company.id),start=askNow.start??(datedCourt?null:search?.start??null),duration=askNow.duration??(datedCourt?null:search?.duration??null);
@@ -350,10 +350,11 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   await reply_(await availableTimesReply(company.id,courtNow.id,dayNow,duration??60));return;
  }
  //    Só faltava a duração: o cliente responde "1 hora" e o sistema segue para o nome ou o resumo.
- const answer=parseTimeDuration(message);
- if(aiConfigured()&&!context.pendingBooking&&context.selectedCourtId&&search?.date&&search.start&&!search.duration&&answer.duration){
+ //    A resposta pode ser o horário final da lista ("12h", "até 12h", "10 às 12") ou a duração ("2 horas").
+ const answer=parseTimeDuration(message),untilEnd=search?.start?parseEndAnswer(message,search.start):null,answered=untilEnd??answer.duration;
+ if(aiConfigured()&&!context.pendingBooking&&context.selectedCourtId&&search?.date&&search.start&&!search.duration&&answered){
   const maxDuration=await arenaMaxDuration(company.id),court={id:String(context.selectedCourtId),name:String(context.selectedCourtName||'')};
-  await reply_(validDuration(answer.duration,maxDuration)?await proceedToBooking(court,search.date,search.start,answer.duration):`${durationError(maxDuration)} Qual duração você prefere?`);return;
+  await reply_(validDuration(answered,maxDuration)?await proceedToBooking(court,search.date,search.start,answered):`${durationError(maxDuration)} Até que horas você quer jogar?`);return;
  }
  //    Horário escolhido da lista ("20", "às 20h"): o sistema confere na agenda antes de responder.
  const timePick=parseBareTime(message);

@@ -39,8 +39,10 @@ export async function searchFreeCourts(courts: readonly SearchCourt[], day: stri
       for (const minutos of durationChoices(maxDuration)) {
         const slot = (await check(court.id, day, minutos)).slots.find((s) => s.inicio === start);
         // Sem parar no primeiro "não": regras da quadra (horas cheias, horário nobre) podem barrar 1h e liberar 2h.
+        // Basta uma duração que caiba para a quadra entrar na lista; as opções completas vêm depois de escolher a quadra.
         if (!slot) continue;
         duracoes.push({ minutos, valor: slot.valor, amountCents: slot.amountCents });
+        break;
       }
       return duracoes.length ? { ...court, mode: 'inicio', duracoes } : null;
     }
@@ -57,10 +59,9 @@ export function freeCourtsMessage(dateLabel: string, start: string | null, durat
     const base = `${bullet(index)} ${court.name} · ${court.sport}`;
     if (court.mode === 'exato') return `${base} · ${court.slot.valor}`;
     if (court.mode === 'duracao') return `${base} (${court.inicios.length === 1 ? '1 horário livre' : `${court.inicios.length} horários livres`})`;
-    const labels = court.duracoes.map((d) => durationLabel(d.minutos));
-    return `${base} (${labels.length > 3 ? `de ${labels[0]} a ${labels.at(-1)}` : labels.join(', ')})`;
+    return base; // as opções "das 10h às 11h (R$ 100)…" vêm depois de escolher a quadra
   });
-  const next = start && duration ? 'Qual quadra você prefere? Envie o número.' : 'Qual quadra você prefere? Envie o número que eu mostro os horários livres dela.';
+  const next = start && duration ? 'Qual quadra você prefere? Envie o número.' : start ? 'Qual quadra você prefere? Envie o número ou o nome.' : 'Qual quadra você prefere? Envie o número que eu mostro os horários livres dela.';
   return `📅 ${dateLabel}, ${start && duration ? `${when}, estas quadras estão livres` : `quadras ${when}`}:\n\n${lines.join('\n')}\n\n${next}`;
 }
 
