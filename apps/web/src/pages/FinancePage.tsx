@@ -3,6 +3,7 @@ import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarCheck, Check, CircleDo
 import { endOfMonth, format, startOfMonth, subDays, subMonths } from 'date-fns';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from 'recharts';
 import { toast } from 'sonner';
+import { CancelBookingDialog } from '@/components/app/booking-actions';
 import { DatePicker } from '@/components/DatePicker';
 import { EmptyState, PageHeader, Panel, Segmented, StatCard } from '@/components/app/page';
 import { ResponsiveSheet } from '@/components/app/ResponsiveSheet';
@@ -206,21 +207,10 @@ export function FinancePage() {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-    <AlertDialog open={Boolean(cancelling)} onOpenChange={(value) => { if (!value) setCancelling(null); }}>
-      <AlertDialogContent>
-        <AlertDialogHeader className="flex flex-row items-start gap-3 text-left">
-          <span className="grid size-10 shrink-0 place-items-center rounded-full bg-rose-50 text-rose-600"><X className="size-5" aria-hidden="true" /></span>
-          <div className="space-y-1"><AlertDialogTitle>Cancelar a reserva?</AlertDialogTitle><AlertDialogDescription>{cancelling ? `${titleOf(cancelling).title} · ${titleOf(cancelling).ref}` : ''}. O valor em aberto sai do Financeiro e o horário fica livre na agenda. Pagamentos já recebidos continuam registrados.</AlertDialogDescription></div>
-        </AlertDialogHeader>
-        <AlertDialogFooter className="grid grid-cols-2 gap-2 sm:flex">
-          <AlertDialogCancel>Voltar</AlertDialogCancel>
-          <AlertDialogAction className="bg-rose-600 text-white hover:bg-rose-700" onClick={async (event) => {
-            event.preventDefault(); const target = cancelling; setCancelling(null); if (!target?.booking_id) return;
-            try { await api(`/api/bookings/${target.booking_id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'cancelled', reason: 'Cancelada pelo Financeiro' }) }); toast.success('Reserva cancelada'); await load(); } catch (cause) { toast.error(errorMessage(cause)); }
-          }}>Cancelar reserva</AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <CancelBookingDialog target={cancelling?.booking_id ? { ids: [cancelling.booking_id], summary: `${titleOf(cancelling).title} · ${titleOf(cancelling).ref}` } : null} onOpenChange={(open) => { if (!open) setCancelling(null); }}
+      onConfirm={async (ids, reason, refund) => {
+        try { await api(`/api/bookings/${ids[0]}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'cancelled', reason: reason || 'Cancelada pelo Financeiro', ...(refund === undefined ? {} : { refund }) }) }); toast.success('Reserva cancelada'); await load(); } catch (cause) { toast.error(errorMessage(cause)); }
+      }} />
   </div>;
 }
 

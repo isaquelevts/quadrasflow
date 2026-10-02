@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isAllCourts, isPhotoRequest, photoQuestion, photosOutcome, askDurationText, courtPriceRange, dayScheduleMessage, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, noCourtsMessage, parseBareTime, parsePeriod, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
+import { isCancelIntent, pickBooking, isAllCourts, isPhotoRequest, photoQuestion, photosOutcome, askDurationText, courtPriceRange, dayScheduleMessage, isGreeting, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, noCourtsMessage, parseBareTime, parsePeriod, priceMessage, timeUnavailableText } from './whatsapp-flow.js';
 
 test('horário solto depois da lista', () => {
   const cases: Array<[string, string | null]> = [['20', '20:00'], ['20h', '20:00'], ['às 20', '20:00'], ['as 17', '17:00'], ['20:30', '20:30'], ['20h30', '20:30'], ['21 horas', '21:00'], ['pode ser 20', null],
@@ -104,4 +104,15 @@ test('textos do fluxo de fotos', () => {
   assert.equal(photosOutcome({ sent: 0, failed: 0, without: ['Areia 1'] }).text, 'Areia 1 ainda não tem fotos cadastradas.\n\nQuer agendar um horário? 📅');
   assert.deepEqual(photosOutcome({ sent: 0, failed: 2, without: [] }), { text: 'Não consegui enviar as fotos agora. Deixei um recado para a equipe te ajudar. 🙏', handoff: true });
   assert.equal(photosOutcome({ sent: 1, failed: 1, without: [] }).handoff, true);
+});
+
+test('pedido de cancelamento', () => {
+  for (const t of ['gostaria de cancelar minha reserva tive um imprevisto', 'quero cancelar', 'cancela pra mim', 'preciso desmarcar', 'não vou poder ir', 'nao vamos conseguir jogar', 'tive um imprevisto', 'desisto da reserva']) assert.equal(isCancelIntent(t), true, t);
+  for (const t of ['quero reservar', 'quero remarcar', 'não quero cancelar', 'qual o prazo pra cancelamento?'.replace('cancelamento', 'remarcar'), 'oi']) assert.equal(isCancelIntent(t), false, t);
+});
+test('escolha da reserva na lista', () => {
+  const opts = [{ id: 'a', court: 'Society 1', start: '2026-10-02T19:00:00.000Z' }, { id: 'b', court: 'Areia 1', start: '2026-10-03T20:00:00.000Z' }, { id: 'c', court: 'Society 1', start: '2026-10-05T19:00:00.000Z' }];
+  const cases: Array<[string, string | null]> = [['1', 'a'], ['2', 'b'], ['a 3', 'c'], ['4', null], ['a da areia', 'b'], ['areia 1', 'b'], ['a de sábado', 'b'], ['a de hoje', 'a'], ['amanhã', 'b'], ['dia 5', 'c'], ['05/10', 'c'], ['society 1 de sexta', 'a'],
+    ['society 1', null], ['a das 19h', null], ['sim', null], ['quero cancelar', null]];
+  for (const [text, expected] of cases) assert.equal(pickBooking(text, opts, '2026-10-02'), expected, text);
 });

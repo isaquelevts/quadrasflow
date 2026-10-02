@@ -43,6 +43,13 @@
       "when": 1790720670686,
       "tag": "0005_finance_booking_open_once",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790905823924,
+      "tag": "0006_client_email",
+      "breakpoints": true
     }
   ]
 }

@@ -182,3 +182,35 @@ export function photosOutcome(a: { sent: number; failed: number; without: readon
   if (a.sent === 0) return { text: `${missing || 'Ainda não tenho fotos dessa quadra.'}\n\nQuer agendar um horário? 📅`, handoff: false };
   return { text: `${missing ? `${missing}\n\n` : ''}Quer agendar um horário? 📅`, handoff: false };
 }
+
+/** Pedido de cancelamento ("cancelar minha reserva", "desmarcar", "não vou poder ir", "tive um imprevisto"). */
+export const isCancelIntent = (text: string) => {
+  const t = norm(text);
+  if (t.length > 160 || /\bn[aã]o (?:quero|vou|precisa) (?:mais )?(?:cancelar|desmarcar)\b/.test(t) || /\bremarc|\breagend/.test(t)) return false;
+  return /\b(cancelar|cancela|cancelamento|cancele|desmarcar|desmarca|desmarque|desistir|desisto)\b/.test(t) || /\bnao (?:vou|vamos|vai) (?:mais )?(?:poder|conseguir|dar pra|dar para)? ?(?:ir|jogar|comparecer)\b/.test(t) || /\bimprevisto\b/.test(t);
+};
+
+export type BookingOption = { id: string; court: string; start: string };
+const WEEKDAYS = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+/** Reserva escolhida pelo cliente numa lista: número ("1"), quadra ("a da society 1"), dia ("a de sexta", "dia 2", "02/10") ou os dois. */
+export function pickBooking(text: string, options: readonly BookingOption[], today: string): string | null {
+  const t = norm(text).replace(/[.!?,]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const number = t.match(/^(?:a |o |reserva |opcao |numero )?(\d{1,2})(?:a|o)?$/);
+  if (number) return options[Number(number[1]) - 1]?.id ?? null;
+  let list = [...options];
+  const courts = [...new Map(options.map((o) => [o.court, { id: o.court, name: o.court }])).values()];
+  const court = courts.length > 1 ? matchCourt(t, courts, false) : null;
+  if (court) list = list.filter((o) => o.court === court);
+  const day = (iso: string) => iso.slice(0, 10), tomorrow = new Date(`${today}T12:00:00Z`); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  const weekday = WEEKDAYS.findIndex((w) => new RegExp(`\\b${w}\\b`).test(t));
+  const dm = t.match(/\b(\d{1,2})\/(\d{1,2})\b/) || t.match(/\bdia (\d{1,2})\b/);
+  let byDay: ((o: BookingOption) => boolean) | null = null;
+  if (/\bhoje\b/.test(t)) byDay = (o) => day(o.start) === today;
+  else if (/\bamanha\b/.test(t)) byDay = (o) => day(o.start) === tomorrow.toISOString().slice(0, 10);
+  else if (weekday >= 0) byDay = (o) => new Date(`${day(o.start)}T12:00:00Z`).getUTCDay() === weekday;
+  else if (dm) byDay = (o) => Number(o.start.slice(8, 10)) === Number(dm[1]) && (!dm[2] || Number(o.start.slice(5, 7)) === Number(dm[2]));
+  if (byDay) list = list.filter(byDay);
+  const time = t.match(/\b(\d{1,2})(?:[:h](\d{2}))?\s*h?\b/);
+  if (time && !dm && Number(time[1]) >= 5 && Number(time[1]) <= 23) { const hh = `${time[1]!.padStart(2, '0')}:${time[2] ?? '00'}`, at = list.filter((o) => o.start.slice(11, 16) === hh); if (at.length) list = at; }
+  return (court || byDay || time) && list.length === 1 ? list[0]!.id : null;
+}

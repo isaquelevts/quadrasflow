@@ -1,5 +1,7 @@
 import {createHash, randomUUID} from 'node:crypto';
-import {syncBookingReceivable} from './booking-finance.js';
+import {changeBookingStatus,syncBookingReceivable} from './booking-finance.js';
+import {getBookingPolicy,paidForBooking,recordRefundDecision,refundText} from './booking-policy.js';
+import {cancelOpenPix,hasOpenPix} from './mercadopago.js';
 import {isSimulating,isSimulatorPhone,simulationNote} from './whatsapp-simulation.js';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -9,7 +11,7 @@ import type {FastifyInstance} from 'fastify';
 import {companies,courts,bookings,bookingEvents,clients,integrationSettings,whatsappConversations,whatsappDeliveries,whatsappMessages,appAudit,financeEntries} from '@quadrasflow/database';
 import {db} from './database.js';
 import {adminOf,companyOf,fail} from './arena.js';
-import {serviceDefaults,safePublicLink,chatDestination,bookingInstant,cancellationAllowed,type ServiceSettings} from './whatsapp-service-rules.js';
+import {serviceDefaults,safePublicLink,chatDestination,bookingInstant,type ServiceSettings} from './whatsapp-service-rules.js';
 export async function serviceSettings(companyId:string):Promise<ServiceSettings> {
  const row=(await db.select().from(integrationSettings).where(and(eq(integrationSettings.companyId,companyId),eq(integrationSettings.provider,'whatsapp_services'))).limit(1))[0];
  return {...serviceDefaults,...(row?.settings as Partial<ServiceSettings>||{})} as ServiceSettings;
@@ -58,29 +60,41 @@ export async function ownBookings(companyId:string,phone:string){
  const list=await db.select({booking:bookings,quadra:courts.name}).from(bookings).innerJoin(courts,eq(courts.id,bookings.courtId)).where(and(eq(bookings.companyId,companyId),eq(bookings.customerPhone,phone),sql`${bookings.status} IN ('pending','confirmed')`)).orderBy(bookings.startAt);
  return list.filter(r=>bookingInstant(r.booking.startAt,bot.timeZone)>Date.now()).slice(0,30).map(r=>({id:r.booking.id,quadra:r.quadra,inicio:r.booking.startAt,fim:r.booking.endAt,status:r.booking.status}));
 }
+const dayLabel=(iso:string)=>{const d=new Date(`${iso.slice(0,10)}T12:00:00Z`);return `${['dom','seg','ter','qua','qui','sex','sáb'][d.getUTCDay()]} ${iso.slice(8,10)}/${iso.slice(5,7)}`;};
+/** "Society 1, qui 01/10, 19:00–20:00" */
+export const bookingLabel=(row:{quadra:string;inicio:string;fim:string})=>`${row.quadra}, ${dayLabel(row.inicio)}, ${row.inicio.slice(11,16)}–${row.fim.slice(11,16)}`;
+/**
+ * Resumo de cancelamento pedido pelo cliente. Cancelar é sempre permitido; o texto diz o que acontece com o dinheiro
+ * (política da arena) e se um Pix ainda em aberto também será cancelado.
+ */
 export async function prepareCancellation(companyId:string,phone:string,id:string){
  const row=(await ownBookings(companyId,phone)).find(r=>r.id===id);if(!row)throw fail(404,'Não encontrei essa reserva entre os seus próximos horários.');
- const company=(await db.select().from(companies).where(eq(companies.id,companyId)).limit(1))[0]!;
- const bot=await integration(companyId,'whatsapp_bot');
- if(!cancellationAllowed(row.status,row.inicio,bot.timeZone,company.cancellationHours))return {manual:true,mensagem:`O prazo de cancelamento é de ${company.cancellationHours} horas antes do jogo. Vou encaminhar para a equipe analisar.`};
- const paid=(await db.select().from(financeEntries).where(and(eq(financeEntries.companyId,companyId),eq(financeEntries.bookingId,id),sql`${financeEntries.paidAt} IS NOT NULL`)).limit(1))[0];
- return {manual:false,id,resumo:`Cancelar ${row.quadra}, dia ${row.inicio.slice(0,10).split('-').reverse().join('/')}, das ${row.inicio.slice(11,16)} às ${row.fim.slice(11,16)}?${paid?' O pagamento já recebido será analisado pela equipe para eventual estorno.':''}\nConfirma o cancelamento?`,createdAt:new Date().toISOString()};
+ const [policy,paid]=await Promise.all([getBookingPolicy(companyId),paidForBooking(db,companyId,id)]);
+ const pixOpen=row.status==='pending'&&paid===0&&await hasOpenPix(companyId,id);
+ const money=paid>0?refundText(policy.refund,paid,'before'):pixOpen?'O Pix que está aguardando pagamento também será cancelado.':'';
+ return {manual:false,id,resumo:`Cancelar a ${bookingLabel(row)}?${money?`\n${money}`:''}\n\nConfirma o cancelamento?`,createdAt:new Date().toISOString()};
 }
+/**
+ * Cancela a reserva do próprio cliente (sempre permitido), acerta o Financeiro conforme a política de devolução,
+ * cancela um Pix ainda em aberto e, se houver devolução a fazer ou analisar, deixa um recado para a equipe.
+ */
 export async function cancelOwnBooking(companyId:string,phone:string,id:string){
- const bot=await integration(companyId,'whatsapp_bot');
- return db.transaction(async tx=>{
-  const row=(await tx.select().from(bookings).where(and(eq(bookings.id,id),eq(bookings.companyId,companyId),eq(bookings.customerPhone,phone))).for('update'))[0];
-  if(!row)throw fail(404,'Reserva não encontrada.');if(row.status==='cancelled')return {cancelled:true,already:true};
-  const company=(await tx.select().from(companies).where(eq(companies.id,companyId)).limit(1))[0]!;
-  if(!cancellationAllowed(row.status,row.startAt,bot.timeZone,company.cancellationHours))throw fail(409,'O prazo ou a situação da reserva mudou. A equipe precisa analisar o cancelamento.');
-  const now=new Date().toISOString();
-  await tx.update(bookings).set({status:'cancelled',cancelReason:'Solicitado pelo cliente no WhatsApp',updatedAt:now}).where(eq(bookings.id,id));
-  await syncBookingReceivable(tx,companyId,id);
-  await tx.insert(bookingEvents).values({id:randomUUID(),companyId,bookingId:id,event:'cancelled',details:{source:'whatsapp',phone},createdAt:now});
-  await tx.insert(appAudit).values({id:randomUUID(),companyId,action:'whatsapp.booking.cancelled',entity:'booking',entityId:id,details:{phone},createdAt:now});
-  await tx.update(whatsappDeliveries).set({status:'skipped',updatedAt:now}).where(and(eq(whatsappDeliveries.bookingId,id),eq(whatsappDeliveries.kind,'review'),eq(whatsappDeliveries.status,'pending')));
-  return {cancelled:true,already:false};
+ const policy=await getBookingPolicy(companyId);
+ const done=await db.transaction(async tx=>{
+  const row=(await tx.select({booking:bookings,quadra:courts.name}).from(bookings).innerJoin(courts,eq(courts.id,bookings.courtId)).where(and(eq(bookings.id,id),eq(bookings.companyId,companyId),eq(bookings.customerPhone,phone))).for('update',{of:bookings}))[0];
+  if(!row)throw fail(404,'Reserva não encontrada.');
+  if(row.booking.status==='cancelled')return {already:true,paid:0,label:bookingLabel({quadra:row.quadra,inicio:row.booking.startAt,fim:row.booking.endAt}),name:row.booking.customerName};
+  const changed=await changeBookingStatus(tx,{companyId,userId:null,bookingId:id,status:'cancelled',reason:'Cancelado pelo cliente no WhatsApp',source:'whatsapp'});
+  if(!changed)throw fail(409,'Essa reserva não pode mais ser cancelada por aqui.');
+  const paid=await paidForBooking(tx,companyId,id),label=bookingLabel({quadra:row.quadra,inicio:row.booking.startAt,fim:row.booking.endAt});
+  if(paid>0&&policy.refund!=='team')await recordRefundDecision(tx,{companyId,bookingId:id,refund:policy.refund==='always',amountCents:paid,label:`${row.booking.customerName} — ${label}`,dueDate:new Date().toISOString().slice(0,10),reason:'cancelada pelo cliente'});
+  await tx.update(whatsappDeliveries).set({status:'skipped',updatedAt:new Date().toISOString()}).where(and(eq(whatsappDeliveries.bookingId,id),eq(whatsappDeliveries.status,'pending')));
+  return {already:false,paid,label,name:row.booking.customerName};
  });
+ if(!done.already)await cancelOpenPix(companyId,id).catch(()=>undefined);
+ const teamNotified=!done.already&&done.paid>0&&policy.refund!=='never';
+ if(teamNotified)await handoff(companyId,phone,policy.refund==='always'?'Estorno a devolver (cliente cancelou)':'Analisar devolução (cliente cancelou)',`${done.name} cancelou ${done.label}. Valor pago: R$ ${(done.paid/100).toFixed(2).replace('.',',')}.`,{pause:false});
+ return {cancelled:true,already:done.already,label:done.label,money:refundText(policy.refund,done.paid,'after'),teamNotified};
 }
 export async function queueCourtPhotos(companyId:string,phone:string,courtId:string,requestId:string){
  const court=(await db.select().from(courts).where(and(eq(courts.id,courtId),eq(courts.companyId,companyId),eq(courts.active,true))).limit(1))[0];if(!court)throw fail(404,'Quadra não encontrada.');

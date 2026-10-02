@@ -89,7 +89,7 @@ class WhatsAppHistorySession implements Session {
   async clearSession() { await db.delete(whatsappMessages).where(and(eq(whatsappMessages.companyId, this.companyId), eq(whatsappMessages.phone, this.phone))); }
 }
 
-function instructions(t: Turn, companyName: string, savedCustomerName: string) {
+function instructions(t: Turn, companyName: string, savedCustomerName: string, hasSavedEmail = false) {
   const c = t.context, now = localNow(t.bot.timeZone || 'America/Belem', t.receivedAt);
   const tomorrow = new Date(`${now.date}T12:00:00Z`); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
   const search = c.search as { date?: string; start?: string | null; duration?: number | null } | undefined;
@@ -100,6 +100,7 @@ function instructions(t: Turn, companyName: string, savedCustomerName: string) {
     search ? `Última busca de quadras: ${search.start ? `início ${search.start}` : 'sem horário'}, ${search.duration ? `${search.duration} minutos` : 'sem duração'} (lista numerada já enviada ao cliente).` : 'Nenhuma lista de quadras enviada ainda.',
     `Quadra escolhida pelo cliente: ${c.selectedCourtName || 'nenhuma'}.`,
     `Nome salvo do cliente: ${savedCustomerName || 'nenhum'}.`,
+    t.paymentRequired ? `E-mail salvo para o Pix: ${hasSavedEmail ? 'sim (não peça de novo; chame preparar_reserva com email_cliente null e o sistema usa o salvo, a menos que o cliente informe outro)' : 'não'}.` : '',
     chosen && !pending ? `Reserva em andamento (já conferida na agenda): ${chosen.courtName}, ${chosen.date}, início ${chosen.start}, ${chosen.minutes} minutos. Falta o nome${t.paymentRequired ? ' e o e-mail' : ''}: use salvar_contato e preparar_reserva com exatamente estes dados.` : '',
     pending ? `Resumo enviado aguardando "sim": ${pending.courtName}, ${pending.date} ${pending.startTime}, ${pending.durationMinutes} min.` : '',
     c.awaitingEmail ? 'O sistema já explicou o pagamento antecipado e pediu o e-mail.' : '',
@@ -250,13 +251,18 @@ async function pickCourt(deps: AgentDeps, turn: Turn, value: string) {
  * Confere o horário na agenda e monta o passo seguinte da reserva: pedido do e-mail (pagamento antecipado) ou o resumo com "Confirma a reserva?".
  * Usada pela ferramenta preparar_reserva e direto pelo sistema quando o cliente já escolheu quadra, horário e duração.
  */
-export async function prepareBookingSummary(deps: AgentDeps, ctx: { companyId: string; context: Record<string, unknown>; bot: AgentBot; paymentRequired: boolean }, a: { court: Court; day: string; startTime: string; minutes: number; customerName: string; customerEmail: string }): Promise<{ erro: string } | { reply: string }> {
+export async function prepareBookingSummary(deps: AgentDeps, ctx: { companyId: string; phone: string; context: Record<string, unknown>; bot: AgentBot; paymentRequired: boolean }, a: { court: Court; day: string; startTime: string; minutes: number; customerName: string; customerEmail: string }): Promise<{ erro: string } | { reply: string }> {
   const free = await deps.availability(ctx.companyId, a.court.id, a.day, a.minutes), slot = free.slots.find((x) => x.inicio === a.startTime);
   if (!slot) return { erro: 'Esse horário não está livre nessa quadra. Ofereça os horários livres dela com consultar_horarios.' };
   ctx.context.selectedCourtId = a.court.id; ctx.context.selectedCourtName = a.court.name;
   ctx.context.chosen = { courtId: a.court.id, courtName: a.court.name, date: a.day, start: a.startTime, minutes: a.minutes };
   const pix = brl(chargeAmountCents(slot.amountCents, ctx.bot));
-  if (ctx.paymentRequired && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.customerEmail)) {
+  // E-mail para o Pix: o informado agora fica salvo no cadastro; sem ele, usa o que já estava salvo (não pergunta de novo).
+  if (ctx.paymentRequired) {
+    if (EMAIL.test(a.customerEmail)) await saveClientEmail(ctx.companyId, ctx.phone, a.customerName, a.customerEmail);
+    else a = { ...a, customerEmail: (await savedClient(ctx.companyId, ctx.phone))?.email || '' };
+  }
+  if (ctx.paymentRequired && !EMAIL.test(a.customerEmail)) {
     ctx.context.awaitingEmail = true;
     return { reply: `Para garantir a reserva, a arena pede um pagamento antecipado de ${pix} via Pix (valor total ${slot.valor}).\n\nQual é o seu e-mail? Ele é usado só para gerar o Pix.` };
   }
@@ -265,6 +271,16 @@ export async function prepareBookingSummary(deps: AgentDeps, ctx: { companyId: s
   ctx.context.pendingBooking = pending;
   const end = deps.timeHH(Number(a.startTime.slice(0, 2)) * 60 + Number(a.startTime.slice(3)) + a.minutes);
   return { reply: `📝 Confira seu pedido:\n\n🏟️ Quadra: ${a.court.name}\n📅 Data: ${displayDate(a.day)}\n🕒 Horário: ${a.startTime} às ${end}\n⏱️ Duração: ${durationLabel(a.minutes)}\n💰 Valor total: ${slot.valor}\n${ctx.paymentRequired ? `💳 Pix agora: ${pix}` : '👤 O pagamento é feito na arena.'}\n\nConfirma a reserva?` };
+}
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** Cadastro do contato na arena (nome e e-mail salvos). */
+export const savedClient = (companyId: string, phone: string) => db.select({ name: clients.name, email: clients.email }).from(clients).where(and(eq(clients.companyId, companyId), eq(clients.phone, phone))).limit(1).then((r) => r[0]);
+/** Guarda o e-mail do contato (o último informado vale). Cria o cadastro se ainda não existir. */
+export async function saveClientEmail(companyId: string, phone: string, name: string, email: string) {
+  const value = email.trim().toLowerCase().slice(0, 200);
+  const updated = await db.update(clients).set({ email: value }).where(and(eq(clients.companyId, companyId), eq(clients.phone, phone))).returning({ id: clients.id });
+  if (!updated.length && name.trim().length >= 2) await db.insert(clients).values({ id: randomUUID(), companyId, name: name.trim().slice(0, 100), phone, email: value, createdAt: new Date().toISOString() });
 }
 
 /** Valores reais da arena (tabela por dia e faixa de horário); com a data já escolhida, só daquele dia. */
@@ -345,12 +361,14 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
         if (!list.length) { delete turn.context.cancellationFlow; return reply(turn, 'Não encontrei reservas futuras para este contato.'); }
         return { reservas: list };
       }),
-    define('preparar_cancelamento', 'Verifica a política e pede confirmação para cancelar uma reserva do contato. Ainda não cancela. Use o id retornado por listar_minhas_reservas.', z.object({ reserva_id: z.string() }),
+    define('preparar_cancelamento', 'Pede confirmação para cancelar uma reserva do contato (cancelar é sempre permitido; o sistema explica o que acontece com o valor pago). Ainda não cancela. Use o id retornado por listar_minhas_reservas.', z.object({ reserva_id: z.string() }),
       async (args, turn) => {
-        const prepared = await prepareCancellation(turn.companyId, turn.phone, String(args.reserva_id || ''));
-        if (prepared.manual) { await handoff(turn.companyId, turn.phone, 'Cancelamento fora do prazo', turn.message); turn.context.handoff = true; return reply(turn, prepared.mensagem!); }
+        // A IA às vezes manda o número da lista ("1") em vez do id: usa a última lista enviada.
+        const options = Array.isArray(turn.context.cancellationOptions) ? turn.context.cancellationOptions as Array<{ id: string }> : [], raw = String(args.reserva_id || '').trim();
+        const id = /^\d{1,2}$/.test(raw) && options[Number(raw) - 1] ? options[Number(raw) - 1]!.id : raw;
+        const prepared = await prepareCancellation(turn.companyId, turn.phone, id);
         delete turn.context.pendingBooking; delete turn.context.intervalStage; delete turn.context.intervalReservation;
-        turn.context.pendingCancellation = prepared;
+        turn.context.pendingCancellation = { id: prepared.id, createdAt: prepared.createdAt };
         return reply(turn, prepared.resumo!);
       }),
     define('salvar_contato', 'Salva ou atualiza o nome do contato da arena assim que ele informar como se chama, mesmo antes de concluir uma reserva.', z.object({ nome: z.string() }),
@@ -503,9 +521,9 @@ export type AgentTurnInput = { companyId: string; session: string; phone: string
 export async function runWhatsAppAgent(deps: AgentDeps, input: AgentTurnInput): Promise<string> {
   ensureClient();
   const { companyId, phone } = input;
-  const [company, savedClient, bot, courtRows] = await Promise.all([
+  const [company, contact, bot, courtRows] = await Promise.all([
     db.select({ name: companies.name, publicOptions: companies.publicOptions }).from(companies).where(eq(companies.id, companyId)).limit(1).then((r) => r[0]),
-    db.select({ name: clients.name }).from(clients).where(and(eq(clients.companyId, companyId), eq(clients.phone, phone))).limit(1).then((r) => r[0]),
+    db.select({ name: clients.name, email: clients.email }).from(clients).where(and(eq(clients.companyId, companyId), eq(clients.phone, phone))).limit(1).then((r) => r[0]),
     deps.botConfig(companyId),
     db.select({ name: courts.name }).from(courts).where(and(eq(courts.companyId, companyId), eq(courts.active, true))),
   ]);
@@ -514,7 +532,7 @@ export async function runWhatsAppAgent(deps: AgentDeps, input: AgentTurnInput): 
   const session = new WhatsAppHistorySession(companyId, phone, input.message);
   const agent = (correction = '') => new Agent<Turn>({
     name: 'Atendente de reservas',
-    instructions: instructions(turn, company?.name || '', savedClient?.name || '') + correction,
+    instructions: instructions(turn, company?.name || '', contact?.name || '', Boolean(contact?.email)) + correction,
     model: process.env.WHATSAPP_AI_MODEL || 'gpt-4.1-mini',
     // store:false — a API Responses guardaria as conversas na OpenAI por padrão; o histórico fica só no nosso banco.
     modelSettings: { temperature: 0.3, toolChoice: 'auto', store: false },

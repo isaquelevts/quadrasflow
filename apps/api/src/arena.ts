@@ -9,6 +9,8 @@ import { bookingAmountCents } from './pricing.js';
 import { maxDurationOf, validMaxDuration } from './booking-duration.js';
 import { findMonthlyConflict, monthlyConflictMessage } from './monthly-conflict.js';
 import { changeBookingStatus, syncBookingReceivable, type BookingStatus } from './booking-finance.js';
+import { getBookingPolicy, paidForBooking, recordRefundDecision, REFUND_POLICIES, saveBookingPolicy, validRescheduleHours, type RefundPolicy } from './booking-policy.js';
+import { cancelOpenPix } from './mercadopago.js';
 
 type AuthedRequest = FastifyRequest & { user: AuthUser | null };
 const fail = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
@@ -24,7 +26,10 @@ function validImageReference(value: string) { return /^https:\/\//i.test(value) 
 function validDay(value: unknown): string { const day = String(value ?? ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(`${day}T12:00:00Z`))) throw fail(400, 'Data inválida.'); return day; }
 function iso(value: unknown) { const date = new Date(String(value ?? '')); if (Number.isNaN(date.valueOf())) throw fail(400, 'Confira a data e o horário.'); return date.toISOString(); }
 function spDay(date = new Date()) { return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(date); }
-function toClient(row: typeof clients.$inferSelect) { return { id: row.id, name: row.name, phone: row.phone, notes: row.notes, created_at: row.createdAt }; }
+function toClient(row: typeof clients.$inferSelect) { return { id: row.id, name: row.name, phone: row.phone, email: row.email, notes: row.notes, created_at: row.createdAt }; }
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** E-mail opcional do cliente (usado só para gerar o Pix). Vazio vira null. */
+function emailOf(value: unknown) { const email = String(value ?? '').trim().toLowerCase(); if (!email) return null; if (email.length > 200 || !EMAIL.test(email)) throw fail(400, 'Informe um e-mail válido.'); return email; }
 /** Telefone comparável: só dígitos e sem o 55 do Brasil. */
 const phoneKey = (value: string | null | undefined) => (value || '').replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '');
 function toCourt(row: typeof courts.$inferSelect) { return { id: row.id, name: row.name, sport: row.sport, price_cents: row.priceCents, photo_url: row.photoUrl, active: row.active ? 1 : 0 }; }
@@ -156,7 +161,7 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const user = userOf(request), companyId = companyOf(request), body = bodyOf(request), name = text(body.name, 'o nome do cliente'), phone = digits(body.phone);
     if (phone && (phone.length < 10 || phone.length > 15)) throw fail(400, 'Informe um telefone com DDD.');
     await assertPhoneFree(companyId, phone);
-    const row = { id: randomUUID(), companyId, name, phone: phone || null, notes: String(body.notes ?? '').slice(0, 1000), createdAt: new Date().toISOString() };
+    const row = { id: randomUUID(), companyId, name, phone: phone || null, email: emailOf(body.email), notes: String(body.notes ?? '').slice(0, 1000), createdAt: new Date().toISOString() };
     try { await db.insert(clients).values(row); } catch (cause) { if (isUniqueViolation(cause)) throw fail(409, 'Esse cliente já está cadastrado.'); throw cause; }
     await audit(companyId, user.id, 'client.created', 'client', row.id);
     return reply.code(201).send({ client: { ...toClient(row), bookings_count: 0, last_booking_at: null } });
@@ -176,8 +181,8 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const phone = body.phone === undefined ? (current.phone || '') : digits(body.phone);
     if (phone && (phone.length < 10 || phone.length > 15)) throw fail(400, 'Informe um telefone com DDD.');
     if (phone !== (current.phone || '')) await assertPhoneFree(companyId, phone, id);
-    const notes = body.notes === undefined ? current.notes : String(body.notes).slice(0, 1000);
-    const rows = await db.update(clients).set({ name, phone: phone || null, notes }).where(and(eq(clients.id, id), eq(clients.companyId, companyId))).returning();
+    const notes = body.notes === undefined ? current.notes : String(body.notes).slice(0, 1000), email = body.email === undefined ? current.email : emailOf(body.email);
+    const rows = await db.update(clients).set({ name, phone: phone || null, email, notes }).where(and(eq(clients.id, id), eq(clients.companyId, companyId))).returning();
     await audit(companyId, user.id, 'client.updated', 'client', id);
     return { client: toClient(rows[0]!) };
   });
@@ -306,9 +311,43 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const user = userOf(request), companyId = companyOf(request), { id } = request.params as { id: string }, body = bodyOf(request), status = String(body.status || '');
     if (!['confirmed', 'cancelled', 'completed'].includes(status)) throw fail(400, 'Status de reserva inválido.');
     // Situação e Financeiro mudam juntos: confirmar cria o "a receber", cancelar tira o que estava em aberto.
-    const result = await db.transaction((tx) => changeBookingStatus(tx, { companyId, userId: user.id, bookingId: id, status: status as BookingStatus, reason: String(body.reason || '') }));
+    // Ao cancelar com valor pago: "refund" (true/false) vem do diálogo; sem ele, vale a política da arena (a equipe decide = nada registrado).
+    const policy = status === 'cancelled' ? await getBookingPolicy(companyId) : null;
+    const result = await db.transaction(async (tx) => {
+      const done = await changeBookingStatus(tx, { companyId, userId: user.id, bookingId: id, status: status as BookingStatus, reason: String(body.reason || '') });
+      if (!done || status !== 'cancelled' || !policy) return done;
+      const paid = await paidForBooking(tx, companyId, id), refund = typeof body.refund === 'boolean' ? body.refund : policy.refund === 'team' ? null : policy.refund === 'always';
+      if (paid > 0 && refund !== null) {
+        const row = (await tx.select({ name: bookings.customerName, startAt: bookings.startAt, court: courts.name }).from(bookings).innerJoin(courts, eq(courts.id, bookings.courtId)).where(eq(bookings.id, id)).limit(1))[0];
+        await recordRefundDecision(tx, { companyId, bookingId: id, refund, amountCents: paid, label: `${row?.name || 'Cliente'} — ${row?.court || 'Quadra'} ${row ? `${row.startAt.slice(8, 10)}/${row.startAt.slice(5, 7)} ${row.startAt.slice(11, 16)}` : ''}`, dueDate: new Date().toISOString().slice(0, 10), reason: 'cancelada pela equipe' });
+      }
+      return done;
+    });
     if (!result) throw fail(404, 'Reserva não encontrada ou já encerrada.');
+    if (status === 'cancelled') await cancelOpenPix(companyId, id).catch(() => undefined);
     return { ok: true, status, reviewToken: result.reviewToken };
+  });
+  // Antes de cancelar pelo painel: quanto já foi pago nas reservas escolhidas e o que a política da arena manda fazer.
+  app.get('/api/bookings/cancel-preview', auth, async (request) => {
+    const companyId = companyOf(request), ids = String((request.query as { ids?: string }).ids || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 100);
+    const policy = await getBookingPolicy(companyId);
+    let paidCents = 0, withPaid = 0;
+    for (const id of ids) { const paid = await paidForBooking(db, companyId, id); paidCents += paid; if (paid > 0) withPaid += 1; }
+    return { paid_cents: paidCents, with_paid: withPaid, refund_policy: policy.refund };
+  });
+  // Cancelamento e remarcação (Configurações): devolução ao cancelar e se/quando o cliente pode remarcar pelo WhatsApp.
+  app.get('/api/arena/booking-policy', auth, async (request) => {
+    const p = await getBookingPolicy(companyOf(request));
+    return { refund: p.refund, allowReschedule: p.allowReschedule, rescheduleHours: p.rescheduleHours };
+  });
+  app.put('/api/arena/booking-policy', auth, async (request) => {
+    const user = adminOf(request), companyId = companyOf(request), body = bodyOf(request), refund = String(body.refund || ''), hours = Number(body.rescheduleHours);
+    if (!REFUND_POLICIES.includes(refund as RefundPolicy)) throw fail(400, 'Escolha o que acontece com o valor pago ao cancelar.');
+    if (!validRescheduleHours(hours)) throw fail(400, 'O prazo de remarcação deve ser de 0 a 720 horas.');
+    const policy = { refund: refund as RefundPolicy, allowReschedule: body.allowReschedule !== false, rescheduleHours: hours };
+    await saveBookingPolicy(companyId, policy);
+    await audit(companyId, user.id, 'arena.booking_policy_updated', 'company', companyId, policy);
+    return policy;
   });
 }
 

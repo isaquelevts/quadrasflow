@@ -1,6 +1,6 @@
 import { useEffect, useState, type ComponentType, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { Check, Clock, Copy, CopyCheck, CreditCard, ExternalLink, Image, LoaderCircle, MapPin, Plus, Store, Tags, X, type LucideProps } from 'lucide-react';
+import { CalendarX2, Check, Clock, Copy, CopyCheck, CreditCard, ExternalLink, Image, LoaderCircle, MapPin, Plus, Store, Tags, X, type LucideProps } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/auth/AuthProvider';
 import { ArenaImagePicker } from '@/components/ArenaImagePicker';
@@ -10,6 +10,7 @@ import { ToneBadge } from '@/components/app/status';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
@@ -21,14 +22,21 @@ type Hour = { weekday: number; is_open: boolean | number; open_time: string; clo
 type PriceDay = { weekday: number; morning: number; afternoon: number; evening: number };
 type Profile = { description: string; address: string; city: string; state: string; amenities: string[]; photos: string[] };
 type MpStatus = { connected: boolean; configured: boolean };
-type Section = 'perfil' | 'horarios' | 'precos' | 'pagamentos';
+type Section = 'perfil' | 'horarios' | 'precos' | 'cancelamento' | 'pagamentos';
+type RefundPolicy = 'always' | 'never' | 'team';
+type BookingPolicy = { refund: RefundPolicy; allowReschedule: boolean; rescheduleHours: number };
 
 const DAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
 const ORDER = [1, 2, 3, 4, 5, 6, 0];
 const TIMES = Array.from({ length: 36 }, (_, i) => `${String(6 + Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`);
 const BANDS: Array<['morning' | 'afternoon' | 'evening', string]> = [['morning', 'Manhã · 08h–12h'], ['afternoon', 'Tarde · 12h–18h'], ['evening', 'Noite · 18h–23h']];
 const SUGGESTED = ['Estacionamento', 'Vestiário', 'Chuveiro', 'Bar', 'Wi-Fi', 'Iluminação', 'Aluguel de bolas', 'Arquibancada'];
-const SECTIONS: Array<[Section, string, ComponentType<LucideProps>]> = [['perfil', 'Perfil público', Store], ['horarios', 'Horários', Clock], ['precos', 'Preços', Tags], ['pagamentos', 'Pagamentos', CreditCard]];
+const SECTIONS: Array<[Section, string, ComponentType<LucideProps>]> = [['perfil', 'Perfil público', Store], ['horarios', 'Horários', Clock], ['precos', 'Preços', Tags], ['cancelamento', 'Cancelamento', CalendarX2], ['pagamentos', 'Pagamentos', CreditCard]];
+const REFUND_OPTIONS: Array<[RefundPolicy, string, string]> = [
+  ['always', 'Sempre devolve', 'Cancelou, a equipe devolve o valor pago (Pix ou sinal), não importa a hora.'],
+  ['never', 'Não devolve', 'O cliente pode cancelar e liberar o horário, mas o valor pago fica com a arena.'],
+  ['team', 'A equipe decide caso a caso', 'O cliente é avisado de que a equipe vai analisar a devolução.'],
+];
 
 export function SettingsPage() {
   const { user } = useAuth();
@@ -36,6 +44,7 @@ export function SettingsPage() {
   const [hours, setHours] = useState<Hour[]>([]);
   const [prices, setPrices] = useState<PriceDay[]>([]);
   const [maxDuration, setMaxDuration] = useState(480);
+  const [policy, setPolicy] = useState<BookingPolicy>({ refund: 'team', allowReschedule: true, rescheduleHours: 24 });
   const [profile, setProfile] = useState<Profile>({ description: '', address: '', city: '', state: '', amenities: [], photos: [] });
   const [mp, setMp] = useState<MpStatus>({ connected: false, configured: false });
   const [loading, setLoading] = useState(true);
@@ -46,8 +55,9 @@ export function SettingsPage() {
   const publicUrl = user?.company?.slug ? `${window.location.origin}/a/${user.company.slug}` : '';
 
   useEffect(() => {
-    Promise.all([api<{ weeklyHours: Hour[]; maxDurationMinutes?: number; prices: PriceDay[]; profile: Profile }>('/api/arena/settings'), api<MpStatus>('/api/integrations/mercadopago')])
-      .then(([settings, payment]) => {
+    Promise.all([api<{ weeklyHours: Hour[]; maxDurationMinutes?: number; prices: PriceDay[]; profile: Profile }>('/api/arena/settings'), api<MpStatus>('/api/integrations/mercadopago'), api<BookingPolicy>('/api/arena/booking-policy')])
+      .then(([settings, payment, bookingPolicy]) => {
+        setPolicy(bookingPolicy);
         setHours(settings.weeklyHours.map((h) => ({ ...h, is_open: Boolean(h.is_open) })));
         setPrices(settings.prices);
         setMaxDuration(settings.maxDurationMinutes || 480);
@@ -69,6 +79,7 @@ export function SettingsPage() {
   }
   const saveHours = () => save('horarios', () => api('/api/arena/settings', { method: 'PUT', body: JSON.stringify({ weeklyHours: hours.map((h) => ({ weekday: h.weekday, isOpen: Boolean(h.is_open), openTime: h.open_time, closeTime: h.close_time })), maxDurationMinutes: maxDuration }) }), 'Horários salvos');
   const savePrices = () => save('precos', () => api('/api/arena/prices', { method: 'PUT', body: JSON.stringify({ prices }) }), 'Preços salvos');
+  const savePolicy = () => save('cancelamento', () => api('/api/arena/booking-policy', { method: 'PUT', body: JSON.stringify(policy) }), 'Regras de cancelamento salvas');
   const saveProfile = () => save('perfil', () => api('/api/arena/profile', { method: 'PUT', body: JSON.stringify({ profile }) }), 'Perfil da arena salvo');
   async function connectMp() {
     setConnecting(true);
@@ -140,6 +151,25 @@ export function SettingsPage() {
             </tr>)}</tbody>
           </table></div>
           <p className="text-[12px] text-muted-foreground">Mínimo de {formatCurrency(2000)} por hora em cada faixa. Ex.: 19:00–20:30 à noite = 1h30 pelo preço da noite.</p>
+        </Card>}
+
+        {section === 'cancelamento' && <Card icon={CalendarX2} title="Cancelamento e remarcação" sub="Vale para o WhatsApp e para o painel. Cancelar é sempre permitido: o horário volta a ficar livre."
+          footer={<SaveButton saving={saving === 'cancelamento'} onClick={() => void savePolicy()} />}>
+          <fieldset className="space-y-2"><legend className="mb-2 font-medium" id="refund-legend">Quando o cliente cancela, o valor pago…</legend>
+            <RadioGroup aria-labelledby="refund-legend" value={policy.refund} onValueChange={(value) => setPolicy((p) => ({ ...p, refund: value as RefundPolicy }))} className="gap-2">
+              {REFUND_OPTIONS.map(([value, title, text]) => <Label key={value} htmlFor={`refund-${value}`} className={cn('flex cursor-pointer items-start gap-3 rounded-lg border p-3 font-normal leading-normal transition', policy.refund === value ? 'border-brand-500 bg-brand-50/60' : 'hover:bg-muted/40')}>
+                <RadioGroupItem id={`refund-${value}`} value={value} className="mt-0.5" />
+                <span className="space-y-0.5"><span className="block font-medium leading-snug">{title}</span><span className="block text-[12.5px] leading-snug text-muted-foreground">{text}</span></span></Label>)}
+            </RadioGroup>
+            <p className="text-[12.5px] text-muted-foreground">A devolução é feita pela equipe: o sistema registra "Estorno a devolver" no Financeiro e avisa no sininho.</p>
+          </fieldset>
+          <div className="space-y-3 rounded-lg border p-3">
+            <label className="flex cursor-pointer items-center justify-between gap-3"><span><span className="block font-medium">Permitir remarcação pelo WhatsApp</span><span className="block text-[12.5px] text-muted-foreground">O cliente troca o dia ou o horário e mantém o que já pagou.</span></span>
+              <Switch checked={policy.allowReschedule} onCheckedChange={(v) => setPolicy((p) => ({ ...p, allowReschedule: v }))} aria-label="Permitir remarcação pelo WhatsApp" /></label>
+            {policy.allowReschedule && <div className="flex flex-wrap items-center gap-2 text-[13.5px]"><Label htmlFor="reschedule-hours">Até</Label>
+              <Input id="reschedule-hours" className="h-9 w-20 text-center tabular-nums" type="number" min={0} max={720} value={policy.rescheduleHours} onChange={(e) => setPolicy((p) => ({ ...p, rescheduleHours: Math.max(0, Math.min(720, Math.round(Number(e.target.value) || 0))) }))} />
+              <span className="text-muted-foreground">horas antes do jogo{policy.rescheduleHours === 0 ? ' (até o horário de início)' : ''}</span></div>}
+          </div>
         </Card>}
 
         {section === 'pagamentos' && <Card icon={CreditCard} title="Pagamentos · Mercado Pago" sub="A conta que recebe os Pix das reservas, mensalidades e inscrições.">

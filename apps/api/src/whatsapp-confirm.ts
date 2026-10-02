@@ -10,3 +10,10 @@ export function confirmsSummary(message: string) {
   if (!text || text.length > 80) return false;
   return YES.test(text) && !HESITATION.test(text);
 }
+
+/** O cliente confirmou o cancelamento? Aqui "pode cancelar" / "cancela sim" é confirmação, não dúvida. */
+export function confirmsCancellation(message: string) {
+  const text = clean(message);
+  if (!text || text.length > 80 || /\b(?:nao|espera|perai|errado|errada|outra|outro|mantem|manter|deixa)\b/.test(text)) return false;
+  return YES.test(text) || /^(?:(?:sim|isso|ok|pode)\s+)*(?:pode\s+)?(?:cancela|cancelar|cancele|cancelado|cancelada)\b/.test(text) || /^confirmo o cancelamento\b/.test(text);
+}

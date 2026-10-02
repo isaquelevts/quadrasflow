@@ -16,7 +16,7 @@ import { fmtDate, todayKey, shiftKey } from '@/lib/arena';
 import { errorMessage, formatCurrency, formatPhone, plural, whatsappLink } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
-type Client = { id: string; name: string; phone: string | null; notes?: string; created_at: string; bookings_count: number; last_booking_at: string | null };
+type Client = { id: string; name: string; phone: string | null; email?: string | null; notes?: string; created_at: string; bookings_count: number; last_booking_at: string | null };
 type Member = { clientId: string; status: string; weekday: number; start_time: string; court_name: string };
 type Review = { id: string; customer_name: string; rating: number; comment: string; created_at: string };
 type Filter = 'all' | 'monthly' | 'with' | 'without';
@@ -170,13 +170,14 @@ function ClientSheet({ client, plan, onClose, onChanged, tags }: { client: Clien
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [notes, setNotes] = useState('');
+  const [email, setEmail] = useState('');
   const [history, setHistory] = useState<HistoryItem[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     if (!client) return;
-    setEditing(false); setName(client.name); setPhone(client.phone ? formatPhone(client.phone) : ''); setNotes(client.notes || ''); setError(''); setHistory(null);
+    setEditing(false); setName(client.name); setPhone(client.phone ? formatPhone(client.phone) : ''); setEmail(client.email || ''); setNotes(client.notes || ''); setError(''); setHistory(null);
     api<{ bookings: HistoryItem[] }>(`/api/clients/${client.id}/bookings`).then((data) => setHistory(data.bookings)).catch(() => setHistory([]));
   }, [client?.id]);
 
@@ -194,12 +195,13 @@ function ClientSheet({ client, plan, onClose, onChanged, tags }: { client: Clien
   const reserveLink = client ? `/reservas?nova=1&nome=${encodeURIComponent(client.name)}${client.phone ? `&tel=${encodeURIComponent(client.phone)}` : ''}` : '/reservas';
   const notesChanged = client ? notes !== (client.notes || '') : false;
   return <ResponsiveSheet open={Boolean(client)} onOpenChange={(open) => { if (!open) onClose(); }} title={client?.name}
-    description={client && <span className="flex flex-wrap items-center gap-1.5">{client.phone && <span className="tabular-nums">{formatPhone(client.phone)}</span>}{tags}</span>}>
+    description={client && <span className="flex flex-wrap items-center gap-1.5">{client.phone && <span className="tabular-nums">{formatPhone(client.phone)}</span>}{client.email && <span className="break-all">· {client.email}</span>}{tags}</span>}>
     {client && <div className="space-y-4 p-5">
-      {editing ? <form className="space-y-3 rounded-lg border p-3" onSubmit={(event) => { event.preventDefault(); void save({ name: name.trim(), phone }, 'Cliente atualizado'); }}>
+      {editing ? <form className="space-y-3 rounded-lg border p-3" onSubmit={(event) => { event.preventDefault(); void save({ name: name.trim(), phone, email: email.trim() }, 'Cliente atualizado'); }}>
         <div className="grid gap-1.5"><Label htmlFor="edit-client-name">Nome</Label><Input id="edit-client-name" className="h-10" maxLength={100} value={name} onChange={(e) => setName(e.target.value)} /></div>
         <div className="grid gap-1.5"><Label htmlFor="edit-client-phone">WhatsApp</Label><Input id="edit-client-phone" className="h-10" type="tel" inputMode="tel" value={phone} onChange={(e) => setPhone(e.target.value)} onBlur={() => setPhone(formatPhone(phone))} /></div>
-        <div className="grid grid-cols-2 gap-2"><Button type="button" variant="outline" onClick={() => { setEditing(false); setName(client.name); setPhone(client.phone ? formatPhone(client.phone) : ''); setError(''); }}>Cancelar</Button><Button type="submit" disabled={saving || name.trim().length < 2}>{saving && <LoaderCircle className="animate-spin" />}Salvar</Button></div>
+        <div className="grid gap-1.5"><Label htmlFor="edit-client-email">E-mail <span className="font-normal text-muted-foreground">(usado só para gerar o Pix)</span></Label><Input id="edit-client-email" className="h-10" type="email" inputMode="email" autoComplete="off" maxLength={200} placeholder="cliente@email.com" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
+        <div className="grid grid-cols-2 gap-2"><Button type="button" variant="outline" onClick={() => { setEditing(false); setName(client.name); setPhone(client.phone ? formatPhone(client.phone) : ''); setEmail(client.email || ''); setError(''); }}>Cancelar</Button><Button type="submit" disabled={saving || name.trim().length < 2}>{saving && <LoaderCircle className="animate-spin" />}Salvar</Button></div>
       </form> : <div className="grid grid-cols-3 gap-2">
         {wa ? <Button asChild className="h-10"><a href={wa} target="_blank" rel="noreferrer"><MessageCircle /> WhatsApp</a></Button> : <Button className="h-10" disabled><MessageCircle /> Sem tel.</Button>}
         <Button asChild variant="outline" className="h-10"><Link to={reserveLink}><CalendarPlus /> Reservar</Link></Button>

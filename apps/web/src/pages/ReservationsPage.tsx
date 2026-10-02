@@ -251,7 +251,7 @@ export function ReservationsPage() {
       onCancel={(b) => askCancel([b])} onPix={(b) => void actions.pixLink(b.id)}
       onRelease={async (block) => { if (await actions.releaseBlock(block.id)) setDetail(null); }} />
     <CancelBookingDialog target={cancelTarget} onOpenChange={(open) => { if (!open) setCancelTarget(null); }}
-      onConfirm={async (ids, reason) => { if (await actions.setStatus(ids, 'cancelled', reason)) setDetail(null); }} />
+      onConfirm={async (ids, reason, refund) => { if (await actions.setStatus(ids, 'cancelled', reason, refund)) setDetail(null); }} />
   </div>;
 }
 
