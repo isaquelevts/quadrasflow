@@ -10,7 +10,7 @@ import { parseCourtRules, validateCourtRules } from './court-rules.js';
 import { maxDurationOf, validMaxDuration } from './booking-duration.js';
 import { findMonthlyConflict, monthlyConflictMessage } from './monthly-conflict.js';
 import { changeBookingStatus, syncBookingReceivable, type BookingStatus } from './booking-finance.js';
-import { getBookingPolicy, paidForBooking, recordRefundDecision, REFUND_POLICIES, saveBookingPolicy, validRescheduleHours, type RefundPolicy } from './booking-policy.js';
+import { arenaToday, getBookingPolicy, paidForBooking, recordRefundDecision, REFUND_POLICIES, saveBookingPolicy, validRescheduleHours, type RefundPolicy } from './booking-policy.js';
 import { cancelOpenPix } from './mercadopago.js';
 
 type AuthedRequest = FastifyRequest & { user: AuthUser | null };
@@ -329,7 +329,7 @@ export async function registerArenaRoutes(app: FastifyInstance) {
       const paid = await paidForBooking(tx, companyId, id), refund = typeof body.refund === 'boolean' ? body.refund : policy.refund === 'team' ? null : policy.refund === 'always';
       if (paid > 0 && refund !== null) {
         const row = (await tx.select({ name: bookings.customerName, startAt: bookings.startAt, court: courts.name }).from(bookings).innerJoin(courts, eq(courts.id, bookings.courtId)).where(eq(bookings.id, id)).limit(1))[0];
-        await recordRefundDecision(tx, { companyId, bookingId: id, refund, amountCents: paid, label: `${row?.name || 'Cliente'} — ${row?.court || 'Quadra'} ${row ? `${row.startAt.slice(8, 10)}/${row.startAt.slice(5, 7)} ${row.startAt.slice(11, 16)}` : ''}`, dueDate: new Date().toISOString().slice(0, 10), reason: 'cancelada pela equipe' });
+        await recordRefundDecision(tx, { companyId, bookingId: id, refund, amountCents: paid, label: `${row?.name || 'Cliente'} — ${row?.court || 'Quadra'} ${row ? `${row.startAt.slice(8, 10)}/${row.startAt.slice(5, 7)} ${row.startAt.slice(11, 16)}` : ''}`, dueDate: await arenaToday(companyId), reason: 'cancelada pela equipe' });
       }
       return done;
     });

@@ -30,3 +30,6 @@ export function parseArenaDate(input:string,timeZone:string,instant=new Date()):
  if(day>shift(today,90))return {question:'Aceitamos reservas para os próximos 90 dias. Qual data dentro desse período você prefere?'};
  return {date:day};
 }
+
+/** Data (AAAA-MM-DD) no fuso informado. Lançamentos usam o dia da arena, não o de UTC (que vira às 21h em Belém). */
+export const dayIn=(timeZone:string,instant=new Date())=>new Intl.DateTimeFormat('en-CA',{timeZone:timeZone||'America/Sao_Paulo'}).format(instant);

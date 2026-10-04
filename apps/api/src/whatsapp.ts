@@ -16,7 +16,7 @@ import { testPhoneMatches } from './whatsapp-test-mode.js';
 import { parseCourtRules, ruleProblem, ruleProblemText } from './court-rules.js';
 import { DATE_QUESTION, NAME_QUESTION, endOptionsText, parseEndAnswer, isAllCourts, isCancelIntent, isRescheduleIntent, rescheduleSummary, rescheduledText, pickBooking, type BookingOption, isGreeting, isPhotoRequest, photoQuestion, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
 import { durationChoices, durationError, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
-import { confirmsCancellation, confirmsSummary } from './whatsapp-confirm.js';
+import { asksChange, confirmsCancellation, confirmsSummary, isBareNumber } from './whatsapp-confirm.js';
 import { isSimulating, runSimulation, simulationNote, simulatorPhone, SIMULATOR_PREFIX } from './whatsapp-simulation.js';
 import { chargeAmountCents, type PaymentPolicy } from './payment-policy.js';
 import { displayDate, localNow, parseArenaDate } from './arena-dates.js';
@@ -169,10 +169,14 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   await sendText(company.id,session,phone,outside?outsideHoursText(bot):bot.handoffMessage);return;
  }
  // Cancelamento: feito pelo sistema (sempre permitido). Confirmação → cancela; lista de reservas → escolha; pedido → lista ou resumo.
+ // Nomes das quadras: uma resposta que cita outra quadra ("sim, na areia 1") é mudança, não confirmação.
+ const courtNames=(await activeCourts(company.id)).map(c=>c.name);
  const cancellation=context.pendingCancellation as {id:string;createdAt:string}|undefined,cancelPick=context.cancelPick as {at:string;options:BookingOption[]}|undefined;
  const sayCancel=async(text:string)=>{await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,text);};
  const startCancellation=async(id:string)=>{const prepared=await prepareCancellation(company.id,phone,id);delete context.cancelPick;delete context.pendingBooking;delete context.chosen;context.pendingCancellation={id:prepared.id,createdAt:prepared.createdAt};await sayCancel(prepared.resumo);};
- if(cancellation&&(confirmsCancellation(message)||affirmative(message))){
+ // Número solto depois do resumo (ex.: o "1" da lista repetido): não cancela; pede uma confirmação clara.
+ if(cancellation&&isBareNumber(message)){await sayCancel('Para confirmar o cancelamento, responda *sim*. Se não quiser cancelar, é só dizer *não*. 🙂');return;}
+ if(cancellation&&confirmsCancellation(message,courtNames)){
   delete context.pendingCancellation;delete context.cancellationFlow;delete context.cancellationOptions;
   if(Date.now()-Date.parse(cancellation.createdAt)>10*60000){await sayCancel('A confirmação expirou. Se ainda quiser cancelar, é só me pedir de novo. 🙂');return;}
   try{const done=await cancelOwnBooking(company.id,phone,cancellation.id);/* o recado do handoff fica no contexto que será salvo agora */if(done.teamNotified)context.awaitingTeam={at:new Date().toISOString(),reason:'Devolução de cancelamento'};await sayCancel(done.already?`Essa reserva já estava cancelada. 🙂`:`Pronto! Sua reserva da ${done.label} foi cancelada e o horário ficou livre.${done.money?`\n\n${done.money}`:''}\n\nSe quiser marcar outro horário, é só me chamar. 🙂`);}
@@ -228,7 +232,7 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   await sayRs(reply??`Para quando você quer mudar a reserva da ${state.from}? Me diga o dia e o horário. 🙂`);
  };
  if(rs&&rsFresh){
-  if(rs.step==='confirm'&&rs.to&&(confirmsSummary(message)||affirmative(message))){
+  if(rs.step==='confirm'&&rs.to&&confirmsSummary(message,courtNames)){
    delete context.reschedule;
    try{const done=await rescheduleOwnBooking(company.id,phone,rs.bookingId!,{courtId:rs.to.courtId,startAt:rs.to.startAt,endAt:rs.to.endAt});if(done.excess>0)context.awaitingTeam={at:new Date().toISOString(),reason:'Estorno a devolver (remarcação)'};await sayRs(rescheduledText({to:done.label,amountCents:done.amountCents,paidCents:done.paid}));}
    catch(error){const why=error instanceof Error?error.message:'';await sayRs(`Não consegui remarcar: ${why||'o horário não está mais disponível'}. Quer escolher outro horário? 🙂`);}
@@ -298,7 +302,8 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
  }
  // Passos críticos feitos pelo sistema, sem depender da IA lembrar da ferramenta:
  // 1) "sim" claro ao resumo confirma a reserva e envia o Pix na hora.
- if(aiConfigured()&&pending&&fresh&&confirmsSummary(message)){
+ if(aiConfigured()&&pending&&fresh&&isBareNumber(message)){await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,'Para confirmar a reserva, responda *sim*. Se quiser mudar algo, me diga o que trocar. 🙂');return;}
+ if(aiConfigured()&&pending&&fresh&&confirmsSummary(message,courtNames)){
   const done=await confirmPendingBooking(agentDeps,{companyId:company.id,session,phone,context});
   await saveConversationState(company.id,phone,'',context);
   const text=done.error?`Não consegui registrar: ${done.error}`:done.reply;if(text)await sendText(company.id,session,phone,text);return;
@@ -320,6 +325,20 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   return 'erro' in done?unavailable():done.reply;
  };
  const reply_=async(text:string)=>{await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,text);};
+
+ //    Resumo aguardando "sim" e o cliente pede mudança ("pode ser às 21h", "na society 2", "2 horas", "amanhã"):
+ //    mantém o que não mudou (quadra, dia, horário, duração) e manda um resumo novo — nunca confirma o antigo.
+ const pendingNow=context.pendingBooking as PendingBooking|undefined;
+ if(aiConfigured()&&pendingNow&&Date.now()-Date.parse(pendingNow.createdAt)<15*60000&&asksChange(message,courtNames)&&!isBareNumber(message)){
+  const ask=parseTimeDuration(message),list=await activeCourts(company.id),hit=list.length>1?matchCourt(message,list,false):null;
+  const dated=saysDate(message)?parseArenaDate(message,bot.timeZone,receivedAt):null;
+  if(dated&&!dated.date){await reply_(dated.question||'Qual dia você prefere? 📅');return;}
+  if(ask.start||ask.duration||hit||dated?.date){
+   const court=list.find(c=>c.id===(hit??pendingNow.courtId))??{id:pendingNow.courtId,name:pendingNow.courtName},day=dated?.date??pendingNow.date;
+   delete context.pendingBooking;delete context.chosen;context.confirmedDate=day;
+   await reply_(await proceedToBooking(court,day,ask.start??pendingNow.startTime,ask.duration??pendingNow.durationMinutes));return;
+  }
+ }
  const reasonFor=(day:string,start:string)=>{const now=localNow(bot.timeZone,receivedAt);return day===now.date&&start<=now.time?'passou' as const:'ocupado' as const;};
  /** Só o horário é conhecido: pergunta a duração (as que cabem naquela quadra) ou, se não cabe, mostra os horários livres dela. */
  const askDuration=async(court:{id:string;name:string},day:string,start:string):Promise<string>=>{
@@ -381,7 +400,8 @@ async function handleIncoming(company:{id:string;name:string},session:string,pay
   const prev=context.search as {start?:string|null;duration?:Duration|null}|undefined,found=await listFreeCourts(agentDeps,company.id,context,String(context.confirmedDate),asked.start??prev?.start??null,asked.duration??prev?.duration??null);
   await saveConversationState(company.id,phone,'',context);await sendText(company.id,session,phone,found.message);return;
  }
- const canConfirm=Boolean(pending&&fresh&&!/\b(n[ãa]o|cancel)/i.test(message));
+ // A IA só pode confirmar quando a mensagem não pede mudança ("pode ser às 21h" é mudança, não "sim").
+ const canConfirm=Boolean(pending&&fresh&&!/\b(n[ãa]o|cancel)/i.test(message)&&!asksChange(message,courtNames));
  let reply:string;if(aiConfigured()){try{reply=await callOpenAi(company.id,session,phone,context,message,canConfirm,receivedAt);}catch(error){console.error('whatsapp_ai_unavailable',error instanceof Error?error.message:'unknown');await handoff(company.id,phone,'Instabilidade do atendimento automático',message);delete context.pendingBooking;await sendText(company.id,session,phone,'Tive uma instabilidade no atendimento automático. Sua mensagem ficou registrada e vou chamar alguém da equipe para continuar com você.');return;}}else{await handleIncomingScript(company,session,payload);return;}
  if(context.handoff===true){if(reply)await sendText(company.id,session,phone,reply);return;}await saveConversationState(company.id,phone,'',context);if(reply)await sendText(company.id,session,phone,reply);
 }

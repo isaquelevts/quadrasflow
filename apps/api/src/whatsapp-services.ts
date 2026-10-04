@@ -1,6 +1,6 @@
 import {createHash, randomUUID} from 'node:crypto';
 import {changeBookingStatus,syncBookingReceivable} from './booking-finance.js';
-import {getBookingPolicy,paidForBooking,recordRefundDecision,refundText} from './booking-policy.js';
+import {arenaToday,getBookingPolicy,paidForBooking,recordRefundDecision,refundText} from './booking-policy.js';
 import {cancelOpenPix,hasOpenPix} from './mercadopago.js';
 import {isSimulating,isSimulatorPhone,simulationNote} from './whatsapp-simulation.js';
 import {readFile} from 'node:fs/promises';
@@ -82,7 +82,7 @@ export async function prepareCancellation(companyId:string,phone:string,id:strin
  * cancela um Pix ainda em aberto e, se houver devolução a fazer ou analisar, deixa um recado para a equipe.
  */
 export async function cancelOwnBooking(companyId:string,phone:string,id:string){
- const policy=await getBookingPolicy(companyId);
+ const [policy,today]=await Promise.all([getBookingPolicy(companyId),arenaToday(companyId)]);
  const done=await db.transaction(async tx=>{
   const row=(await tx.select({booking:bookings,quadra:courts.name}).from(bookings).innerJoin(courts,eq(courts.id,bookings.courtId)).where(and(eq(bookings.id,id),eq(bookings.companyId,companyId),eq(bookings.customerPhone,phone))).for('update',{of:bookings}))[0];
   if(!row)throw fail(404,'Reserva não encontrada.');
@@ -90,7 +90,7 @@ export async function cancelOwnBooking(companyId:string,phone:string,id:string){
   const changed=await changeBookingStatus(tx,{companyId,userId:null,bookingId:id,status:'cancelled',reason:'Cancelado pelo cliente no WhatsApp',source:'whatsapp'});
   if(!changed)throw fail(409,'Essa reserva não pode mais ser cancelada por aqui.');
   const paid=await paidForBooking(tx,companyId,id),label=bookingLabel({quadra:row.quadra,inicio:row.booking.startAt,fim:row.booking.endAt});
-  if(paid>0&&policy.refund!=='team')await recordRefundDecision(tx,{companyId,bookingId:id,refund:policy.refund==='always',amountCents:paid,label:`${row.booking.customerName} — ${label}`,dueDate:new Date().toISOString().slice(0,10),reason:'cancelada pelo cliente'});
+  if(paid>0&&policy.refund!=='team')await recordRefundDecision(tx,{companyId,bookingId:id,refund:policy.refund==='always',amountCents:paid,label:`${row.booking.customerName} — ${label}`,dueDate:today,reason:'cancelada pelo cliente'});
   await tx.update(whatsappDeliveries).set({status:'skipped',updatedAt:new Date().toISOString()}).where(and(eq(whatsappDeliveries.bookingId,id),eq(whatsappDeliveries.status,'pending')));
   return {already:false,paid,label,name:row.booking.customerName};
  });
@@ -114,6 +114,7 @@ export async function rescheduleCheck(companyId:string,row:{id:string;inicio:str
 export async function rescheduleOwnBooking(companyId:string,phone:string,id:string,to:{courtId:string;startAt:string;endAt:string}){
  const before=(await ownBookings(companyId,phone)).find(r=>r.id===id);if(!before)throw fail(404,'Não encontrei essa reserva entre os seus próximos horários.');
  const check=await rescheduleCheck(companyId,before);if(!check.ok)throw fail(409,'A remarcação dessa reserva não é mais possível por aqui.');
+ const today=await arenaToday(companyId);
  const result=await db.transaction(async tx=>{
   const current=(await tx.select().from(bookings).where(and(eq(bookings.id,id),eq(bookings.companyId,companyId),eq(bookings.customerPhone,phone),sql`${bookings.status} IN ('pending','confirmed')`)).for('update'))[0];
   if(!current)throw fail(404,'Reserva não encontrada.');
@@ -132,7 +133,7 @@ export async function rescheduleOwnBooking(companyId:string,phone:string,id:stri
   await tx.insert(bookingEvents).values({id:randomUUID(),companyId,bookingId:id,userId:null,event:'rescheduled',details:{source:'whatsapp',before:{courtId:current.courtId,startAt:current.startAt,endAt:current.endAt},after:to},createdAt:now});
   await tx.insert(appAudit).values({id:randomUUID(),companyId,userId:null,action:'whatsapp.booking.rescheduled',entity:'booking',entityId:id,details:{phone},createdAt:now});
   const paid=await paidForBooking(tx,companyId,id),label=bookingLabel({quadra:court.name,inicio:to.startAt,fim:to.endAt}),excess=Math.max(0,paid-amountCents);
-  if(excess>0)await recordRefundDecision(tx,{companyId,bookingId:id,refund:true,amountCents:excess,label:`${current.customerName} — ${label}`,dueDate:now.slice(0,10),reason:'remarcada para valor menor'});
+  if(excess>0)await recordRefundDecision(tx,{companyId,bookingId:id,refund:true,amountCents:excess,label:`${current.customerName} — ${label}`,dueDate:today,reason:'remarcada para valor menor'});
   return {label,amountCents,paid,excess,name:current.customerName};
  });
  if(result.excess>0)await handoff(companyId,phone,'Estorno a devolver (remarcação)',`${result.name} remarcou para ${result.label}; a diferença de R$ ${(result.excess/100).toFixed(2).replace('.',',')} deve ser devolvida.`,{pause:false});

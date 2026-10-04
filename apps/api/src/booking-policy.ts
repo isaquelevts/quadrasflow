@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { companies, financeEntries, integrationSettings } from '@quadrasflow/database';
 import { db } from './database.js';
+import { dayIn } from './arena-dates.js';
 
 type Writer = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
 
@@ -36,6 +37,12 @@ export async function saveBookingPolicy(companyId: string, policy: BookingPolicy
       .onConflictDoUpdate({ target: [integrationSettings.companyId, integrationSettings.provider], set: { settings: { refund: policy.refund, allowReschedule: policy.allowReschedule }, updatedAt: now } });
     await tx.update(companies).set({ cancellationHours: policy.rescheduleHours }).where(eq(companies.id, companyId));
   });
+}
+
+/** "Hoje" no fuso da arena (configurado no bot do WhatsApp; sem ele, São Paulo). */
+export async function arenaToday(companyId: string, instant = new Date()) {
+  const row = (await db.select({ settings: integrationSettings.settings }).from(integrationSettings).where(and(eq(integrationSettings.companyId, companyId), eq(integrationSettings.provider, 'whatsapp_bot'))).limit(1))[0];
+  return dayIn(String((row?.settings as { timeZone?: string } | undefined)?.timeZone || ''), instant);
 }
 
 const brl = (cents: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
