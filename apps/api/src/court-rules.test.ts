@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCourtRules, primeMinimum, primeWhen, ruleProblem, ruleProblemText, validateCourtRules, type CourtRules } from './court-rules.js';
+import { firstStart, parseCourtRules, primeMinimum, primeWhen, ruleProblem, ruleProblemText, validateCourtRules, type CourtRules } from './court-rules.js';
 
 const h = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
 const nobre: CourtRules = { step: 30, prime: [{ days: [1, 2, 3, 4, 5], from: '19:00', to: '21:00', minMinutes: 120 }] };
@@ -56,4 +56,33 @@ test('textos para o cliente', () => {
   assert.equal(ruleProblemText({ kind: 'duration' }, 'Society 1'), 'A Society 1 é alugada só em horas cheias (1h, 2h, 3h…).');
   assert.equal(ruleProblemText({ kind: 'start' }, 'Society 1'), 'Na Society 1 os horários começam sempre em hora cheia (19:00, 20:00…).');
   assert.equal(ruleProblemText(ruleProblem(nobre, 3, h('19:00'), h('20:00'))!, 'Areia 1'), 'No horário nobre (seg a sex, das 19h às 21h), a Areia 1 é alugada por no mínimo 2h.');
+});
+
+test('blocos de 2h e 3h: contam a partir da abertura do dia', () => {
+  assert.equal(parseCourtRules({ step: 120 }).step, 120);
+  assert.equal(parseCourtRules({ step: 180 }).step, 180);
+  assert.equal(parseCourtRules({ step: 90 }).step, 30, 'valor desconhecido volta ao padrão');
+  const dois: CourtRules = { step: 120, prime: [] }, tres: CourtRules = { step: 180, prime: [] }, abre = h('08:00');
+  assert.equal(ruleProblem(dois, 3, h('08:00'), h('10:00'), abre), null, '08–10 aceita');
+  assert.equal(ruleProblem(dois, 3, h('10:00'), h('14:00'), abre), null, '10–14 (4h) aceita');
+  assert.equal(ruleProblem(dois, 3, h('09:00'), h('11:00'), abre)?.kind, 'start', '09–11 fora da grade');
+  assert.equal(ruleProblem(dois, 3, h('08:00'), h('09:00'), abre)?.kind, 'duration', '1h não é bloco de 2h');
+  assert.equal(ruleProblem(dois, 3, h('08:00'), h('11:00'), abre)?.kind, 'duration', '3h não é bloco de 2h');
+  assert.equal(ruleProblem(tres, 3, h('08:00'), h('14:00'), abre), null, '08–14 (2 blocos de 3h) aceita');
+  assert.equal(ruleProblem(tres, 3, h('10:00'), h('13:00'), abre)?.kind, 'start');
+  assert.equal(ruleProblem(dois, 3, h('07:00'), h('09:00'), h('07:00')), null, 'abre às 7h: 07–09 aceita');
+  assert.equal(firstStart(dois, h('09:10'), abre), h('10:00'));
+  assert.equal(firstStart(dois, h('10:00'), abre), h('10:00'));
+  assert.equal(firstStart(tres, h('08:00'), abre), h('08:00'));
+  assert.equal(firstStart({ step: 60, prime: [] }, h('08:10'), h('08:30')), h('09:00'), 'horas cheias continuam contando de 00:00');
+});
+
+test('blocos de 2h/3h: validação e mensagens', () => {
+  assert.ok('rules' in validateCourtRules({ step: 120, prime: [] }));
+  assert.ok('rules' in validateCourtRules({ step: 180, prime: [{ days: [5], from: '18:00', to: '23:00', minMinutes: 360 }] }));
+  assert.ok('error' in validateCourtRules({ step: 120, prime: [{ days: [5], from: '18:00', to: '23:00', minMinutes: 180 }] }), 'mínimo de 3h em blocos de 2h');
+  const dois: CourtRules = { step: 120, prime: [] };
+  assert.equal(ruleProblemText(ruleProblem(dois, 3, h('09:00'), h('11:00'), h('08:00'))!, 'Society 1'), 'Na Society 1 os horários são de 2 em 2 horas, a partir das 8h (8h, 10h, 12h…).');
+  assert.equal(ruleProblemText(ruleProblem(dois, 3, h('08:00'), h('09:00'), h('08:00'))!, 'Society 1'), 'A Society 1 é alugada em blocos de 2h (2h, 4h, 6h…).');
+  assert.equal(ruleProblemText(ruleProblem({ step: 180, prime: [] }, 3, h('08:00'), h('10:00'), h('08:00'))!, 'Areia'), 'A Areia é alugada em blocos de 3h (3h, 6h, 9h…).');
 });

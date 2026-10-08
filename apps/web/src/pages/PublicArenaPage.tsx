@@ -12,9 +12,11 @@ import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
 import { durationLabel, errorMessage, formatCurrency, formatDate, initials, whatsappLink } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import { rulesOf, ruleProblem, ruleProblemText, type CourtRules } from '@/lib/court-rules';
+import { firstStart, minDuration, rulesOf, ruleProblem, ruleProblemText, type CourtRules } from '@/lib/court-rules';
 
-type Court = { id: string; name: string; sport: string; price_cents: number; photo_url: string | null; rules?: CourtRules };
+type Court = { id: string; name: string; sport: string; price_cents: number; photo_url: string | null; rules?: CourtRules; location?: { name: string; address: string; maps_url: string } };
+/** Quadra em endereço próprio: "Unidade Centro — Rua A, 10". */
+const placeOf = (c: Court) => c.location?.address ? (c.location.name ? `${c.location.name} — ${c.location.address}` : c.location.address) : '';
 type Busy = { court_id: string; start_at: string; end_at: string };
 type PriceSlot = { weekday: number; start_time: string; end_time: string; price_cents: number };
 type Arena = { name: string; slug: string; description: string; address: string; city: string; state: string; amenities: string[]; photos: string[]; logo_url: string; whatsapp?: string };
@@ -103,14 +105,14 @@ function BookingPage({ slug }: { slug: string }) {
   // Fins válidos: livres até ali e dentro das regras da quadra (só horas cheias, mínimo no horário nobre).
   const endsFor = useCallback((id: string, s: number) => {
     const busy = busyFor(id), rules = rulesFor(id), out: number[] = [];
-    for (let e = s + STEP; e <= Math.min(s + maxDuration, close); e += STEP) { if (overlaps(busy, e - STEP, e)) break; if (e - s >= MIN_DURATION && !ruleProblem(rules, weekday, s, e)) out.push(e); }
+    for (let e = s + STEP; e <= Math.min(s + maxDuration, close); e += STEP) { if (overlaps(busy, e - STEP, e)) break; if (e - s >= MIN_DURATION && !ruleProblem(rules, weekday, s, e, open)) out.push(e); }
     return out;
-  }, [busyFor, rulesFor, close, maxDuration, weekday]);
+  }, [busyFor, rulesFor, open, close, maxDuration, weekday]);
   // Inícios: de 30 em 30 ou só horas cheias, e só os que têm pelo menos um fim válido.
   const startsFor = useCallback((id: string) => {
     if (!data?.hours.is_open) return [] as number[];
-    const step = rulesFor(id).step, out: number[] = [];
-    for (let t = Math.ceil(Math.max(open, notBefore) / step) * step; t + MIN_DURATION <= close; t += step) if (endsFor(id, t).length) out.push(t);
+    const rules = rulesFor(id), step = rules.step, out: number[] = [];
+    for (let t = firstStart(rules, Math.max(open, notBefore), open); t + MIN_DURATION <= close; t += step) if (endsFor(id, t).length) out.push(t);
     return out;
   }, [data, rulesFor, endsFor, open, close, notBefore]);
   // Preço real: faixas de preço da arena por meia hora (a noite pode custar diferente).
@@ -247,6 +249,7 @@ function BookingPage({ slug }: { slug: string }) {
                   </div>
                   <div className="flex flex-1 items-center justify-between gap-2 p-2 pr-3 sm:items-end sm:p-3">
                     <div className="min-w-0"><div className="text-[15px] font-semibold">{c.name}</div><div className="text-[12.5px] text-muted-foreground">{c.sport}</div>
+                      {placeOf(c) && <div className="mt-0.5 flex items-start gap-1 text-[11.5px] text-muted-foreground"><MapPin className="mt-px size-3 shrink-0" aria-hidden="true" /><span className="line-clamp-2">{placeOf(c)}</span></div>}
                       <div className={cn('mt-0.5 text-[12px]', n ? 'font-medium text-brand-600' : 'text-muted-foreground')}>{n ? 'Horários livres' : 'Lotada neste dia'}</div></div>
                     <div className="shrink-0 text-right"><div className="font-bold tabular-nums">{brl(c.price_cents).replace(',00', '')}</div><div className="text-[11px] text-muted-foreground">por hora</div></div>
                     <span aria-hidden="true" className={cn('grid size-6 shrink-0 place-items-center rounded-full border-2 sm:hidden', sel ? 'border-brand-900 bg-brand-900 text-lime-400' : 'border-border')}>{sel && <Check className="size-3.5" />}</span>
@@ -254,13 +257,15 @@ function BookingPage({ slug }: { slug: string }) {
                 </button>;
               })}
             </div>
+            {court && placeOf(court) && <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-brand-50 px-3 py-2 text-[12.5px] text-brand-900"><MapPin className="size-3.5 shrink-0" aria-hidden="true" /><span>A {court.name} fica em <b>{placeOf(court)}</b>.</span>
+              {court.location?.maps_url && <a href={court.location.maps_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 font-medium text-brand-700 underline-offset-2 hover:underline">Ver no mapa<ArrowUpRight className="size-3.5" aria-hidden="true" /></a>}</p>}
           </Step>
 
           <Step id="passo-inicio" n={3} title="Que horas começa?" done={start !== null ? `às ${hm(start)}` : ''} locked={!courtId} lockedText="Escolha o dia e a quadra primeiro.">
             <div className="space-y-4">
               {([['Manhã', Sunrise, 0, 720], ['Tarde', Sun, 720, 1080], ['Noite', Moon, 1080, 1440]] as const).map(([label, Icon, a, b]) => {
                 // Só inícios que ainda podem acontecer (não passados e com 1h antes de fechar); riscado = ocupado.
-                const starts = startsFor(courtId), step = rulesFor(courtId).step, slots: number[] = []; for (let t = Math.ceil(Math.max(a, open, notBefore) / step) * step; t < b && t + MIN_DURATION <= close; t += step) slots.push(t);
+                const starts = startsFor(courtId), step = rulesFor(courtId).step, slots: number[] = []; for (let t = firstStart(rulesFor(courtId), Math.max(a, open, notBefore), open); t < b && t + minDuration(rulesFor(courtId)) <= close; t += step) slots.push(t);
                 if (!slots.length) return null;
                 if (!slots.some((t) => starts.includes(t))) return <div key={label} className="flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground/60 uppercase"><Icon className="size-3.5" aria-hidden="true" />{label} · sem horários</div>;
                 return <div key={label}><div className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground uppercase"><Icon className="size-3.5" aria-hidden="true" />{label}</div>
@@ -275,7 +280,7 @@ function BookingPage({ slug }: { slug: string }) {
               const ends = endsFor(court.id, start), last = ends.at(-1) ?? start, cut = start + maxDuration > last;
               const why = !cut ? '' : last >= close ? `A arena fecha às ${hm(close)}.` : `A quadra está reservada a partir das ${hm(last)}.`;
               // Regra da quadra que explica por que não há 1h (ou 1h30) para esse início.
-              const rules = rulesFor(court.id), shortest = ruleProblem(rules, weekday, start, start + 60) ?? ruleProblem(rules, weekday, start, start + 90);
+              const rules = rulesFor(court.id), shortest = ruleProblem(rules, weekday, start, start + 60, open) ?? ruleProblem(rules, weekday, start, start + 90, open);
               const ruleNote = shortest ? ruleProblemText(shortest, court.name) : '';
               return <>
                 <div className="-mx-4 flex snap-x gap-2 overflow-x-auto px-4 pb-1 [scrollbar-width:none] lg:mx-0 lg:grid lg:grid-cols-4 lg:px-0" role="radiogroup" aria-label="Horário de fim">

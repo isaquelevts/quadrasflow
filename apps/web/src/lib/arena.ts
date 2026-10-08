@@ -4,7 +4,10 @@ import { ptBR } from 'date-fns/locale';
 import { api } from '@/lib/api';
 import { minutesOf, minutesOfTime } from '@/lib/format';
 
-export type Court = { id: string; name: string; sport: string; price_cents: number; photo_url?: string | null; active?: number | boolean; rules?: CourtRules };
+export type Court = { id: string; name: string; sport: string; price_cents: number; photo_url?: string | null; active?: number | boolean; rules?: CourtRules; location?: CourtLocation };
+/** Local próprio da quadra; endereço vazio = fica no endereço da arena. */
+export type CourtLocation = { name: string; address: string; maps_url: string };
+export const courtPlace = (court: Pick<Court, 'location'>) => court.location?.address ? (court.location.name ? `${court.location.name} — ${court.location.address}` : court.location.address) : '';
 export type HoursDay = { weekday: number; is_open: boolean | number; open_time: string; close_time: string };
 export type DayBooking = { id: string; customer_name: string; customer_phone?: string | null; start_at: string; end_at: string; amount_cents: number; status: string; source?: string; court_name: string; court_id: string; sport: string };
 export type Block = { id: string; reason: string; start_at: string; end_at: string; court_name: string; court_id: string };

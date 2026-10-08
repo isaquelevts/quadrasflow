@@ -11,6 +11,7 @@ import type {FastifyInstance} from 'fastify';
 import {companies,companyHours,companyPriceSlots,courts,blockedSlots,bookings,bookingEvents,clients,integrationSettings,whatsappConversations,whatsappDeliveries,whatsappMessages,appAudit,financeEntries} from '@quadrasflow/database';
 import {bookingAmountCents} from './pricing.js';
 import {parseCourtRules,ruleProblem,ruleProblemText} from './court-rules.js';
+import {hasOwnLocation} from './court-location.js';
 import {findMonthlyConflict,monthlyConflictMessage} from './monthly-conflict.js';
 import {db} from './database.js';
 import {adminOf,companyOf,fail} from './arena.js';
@@ -32,7 +33,9 @@ export async function wahaRequest(companyId:string,path:string,body?:unknown) {
 export async function arenaInformation(companyId:string){
  const c=(await db.select().from(companies).where(eq(companies.id,companyId)).limit(1))[0];if(!c)throw fail(404,'Arena não encontrada.');
  const links=(c.publicOptions.contactLinks||{}) as Record<string,string>;
- return {nome:c.name,endereco:[c.address,c.addressNumber,c.district,c.city,c.state].filter(Boolean).join(', '),address:c.address,addressNumber:c.addressNumber,district:c.district,city:c.city,state:c.state,mapsUrl:links.mapsUrl||'',instagramUrl:links.instagramUrl||'',reviewUrl:links.reviewUrl||''};
+ // Quadras em outro endereço: o cliente precisa saber onde fica cada uma.
+ const own=(await db.select({name:courts.name,locationName:courts.locationName,locationAddress:courts.locationAddress,locationMapsUrl:courts.locationMapsUrl}).from(courts).where(and(eq(courts.companyId,companyId),eq(courts.active,true))).orderBy(courts.name)).filter(hasOwnLocation);
+ return {...(own.length?{quadras_em_outro_endereco:own.map(q=>({quadra:q.name,local:q.locationName,endereco:q.locationAddress,mapsUrl:q.locationMapsUrl})),observacao_enderecos:'As quadras listadas ficam no endereço delas; as demais ficam no endereço da arena.'}:{}),nome:c.name,endereco:[c.address,c.addressNumber,c.district,c.city,c.state].filter(Boolean).join(', '),address:c.address,addressNumber:c.addressNumber,district:c.district,city:c.city,state:c.state,mapsUrl:links.mapsUrl||'',instagramUrl:links.instagramUrl||'',reviewUrl:links.reviewUrl||''};
 }
 export async function enqueueDelivery(companyId:string,kind:string,destination:string,payload:Record<string,unknown>,id:string=randomUUID(),bookingId:string|null=null,dueAt=new Date().toISOString()) {
  if(isSimulating()||isSimulatorPhone(destination)){simulationNote('note',`Envio automático "${kind}" (não enviado no simulador).`);return id;}
@@ -122,7 +125,7 @@ export async function rescheduleOwnBooking(companyId:string,phone:string,id:stri
   const court=(await tx.select().from(courts).where(and(eq(courts.id,to.courtId),eq(courts.companyId,companyId),eq(courts.active,true))).limit(1))[0];if(!court)throw fail(404,'A quadra não está disponível.');
   const weekday=new Date(`${to.startAt.slice(0,10)}T12:00:00Z`).getUTCDay(),hour=(await tx.select().from(companyHours).where(and(eq(companyHours.companyId,companyId),eq(companyHours.weekday,weekday))).limit(1))[0];
   if(!hour?.isOpen||to.startAt.slice(11,16)<hour.openTime||to.endAt.slice(11,16)>hour.closeTime)throw fail(400,'Esse horário está fora do funcionamento da arena.');
-  const toMin=(iso:string)=>Number(iso.slice(11,13))*60+Number(iso.slice(14,16)),issue=ruleProblem(parseCourtRules(court.bookingRules),weekday,toMin(to.startAt),toMin(to.endAt));if(issue)throw fail(400,ruleProblemText(issue,court.name));
+  const toMin=(iso:string)=>Number(iso.slice(11,13))*60+Number(iso.slice(14,16)),issue=ruleProblem(parseCourtRules(court.bookingRules),weekday,toMin(to.startAt),toMin(to.endAt),Number(hour.openTime.slice(0,2))*60+Number(hour.openTime.slice(3)));if(issue)throw fail(400,ruleProblemText(issue,court.name));
   const [conflict,block]=await Promise.all([tx.select({id:bookings.id}).from(bookings).where(and(eq(bookings.companyId,companyId),eq(bookings.courtId,to.courtId),ne(bookings.status,'cancelled'),ne(bookings.id,id),lt(bookings.startAt,to.endAt),sql`${bookings.endAt} > ${to.startAt}`)).limit(1),tx.select({id:blockedSlots.id}).from(blockedSlots).where(and(eq(blockedSlots.companyId,companyId),eq(blockedSlots.courtId,to.courtId),lt(blockedSlots.startAt,to.endAt),sql`${blockedSlots.endAt} > ${to.startAt}`)).limit(1)]);
   if(conflict.length||block.length)throw fail(409,'Esse horário acabou de ser ocupado.');
   const monthly=await findMonthlyConflict(tx,companyId,to.courtId,to.startAt,to.endAt);if(monthly)throw fail(409,monthlyConflictMessage(monthly));

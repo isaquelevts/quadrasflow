@@ -21,6 +21,7 @@ import { freeCourtsMessage, parseTimeDuration, searchFreeCourts, type Duration }
 import { dateSaidByClient } from './whatsapp-date-guard.js';
 import { durationLabel, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { parseCourtRules, ruleProblem, ruleProblemText } from './court-rules.js';
+import { courtPlaceText, hasOwnLocation } from './court-location.js';
 import { DATE_QUESTION, dayScheduleMessage, photosOutcome, isPeriodOnly, isTimesQuestion, noCourtsMessage, parsePeriod, periodOf, priceMessage, type Period } from './whatsapp-flow.js';
 import { isOutsideHumanHours, outsideHoursText, type HumanHours } from './whatsapp-handoff-rules.js';
 
@@ -40,6 +41,10 @@ export type AgentDeps = {
   createConfirmedBooking: (companyId: string, phone: string, pending: PendingBooking) => Promise<{ id: string; amountCents: number; courtName: string }>;
   sendBookingPix: (companyId: string, session: string, phone: string, bookingId: string, payerEmail: string) => Promise<string>;
   timeHH: (minutes: number) => string;
+  /** Abertura do dia em minutos (base da grade de 2h/3h das quadras). */
+  openingMinutes: (companyId: string, weekday: number) => Promise<number>;
+  /** Duração ajustada ao bloco da quadra (2h/3h); nas demais, a própria duração. */
+  courtDuration: (courtId: string, minutes: number) => Promise<number>;
 };
 
 /** Estado de uma rodada de atendimento, compartilhado pelas ferramentas via RunContext. */
@@ -192,7 +197,8 @@ export async function listFreeCourts(deps: AgentDeps, companyId: string, context
   if (!list.length && start && duration && active.length) {
     // Nenhuma quadra livre porque todas as regras barram esse pedido (ex.: 1h30 em quadras de horas cheias): explica a regra.
     const s0 = Number(start.slice(0, 2)) * 60 + Number(start.slice(3)), weekday = new Date(`${day}T12:00:00Z`).getUTCDay();
-    const issues = active.map((c) => { const p = ruleProblem(parseCourtRules(c.rules), weekday, s0, s0 + duration); return p ? { p, text: ruleProblemText(p, c.name) } : null; });
+    const opening = await deps.openingMinutes(companyId, weekday);
+    const issues = active.map((c) => { const p = ruleProblem(parseCourtRules(c.rules), weekday, s0, s0 + duration, opening); return p ? { p, text: ruleProblemText(p, c.name) } : null; });
     if (issues.every(Boolean)) {
       context.confirmedDate = day; context.search = { date: day, start: issues.some((i) => i!.p.kind === 'start') ? null : start, duration: null };
       return { message: `${[...new Set(issues.map((i) => i!.text))].join('\n')}\n\n${issues.some((i) => i!.p.kind === 'start') ? 'Qual horário você prefere?' : 'Qual duração você prefere?'}`, list };
@@ -207,8 +213,9 @@ type ActiveCourt = { id: string; name: string; sport: string };
 /** Inícios livres de cada quadra no dia, para a duração dada (já sem horários que passaram hoje) e, se houver, só do período. */
 async function courtTimes(deps: AgentDeps, companyId: string, active: readonly ActiveCourt[], day: string, minutes: number, period: Period | null) {
   const rows = await Promise.all(active.map(async (court) => {
-    const free = await deps.availability(companyId, court.id, day, minutes);
-    return { open: free.open, name: court.name, sport: court.sport, times: free.slots.map((x) => x.inicio).filter((t) => !period || periodOf(t) === period) };
+    // Quadra em blocos de 2h/3h: lista os inícios do bloco dela (com 1h nenhum caberia).
+    const fitted = await deps.courtDuration(court.id, minutes), free = await deps.availability(companyId, court.id, day, fitted);
+    return { open: free.open, name: court.name, sport: court.sport, block: fitted !== minutes ? durationLabel(fitted) : null, times: free.slots.map((x) => x.inicio).filter((t) => !period || periodOf(t) === period) };
   }));
   return { rows, open: rows.some((r) => r.open), union: [...new Set(rows.flatMap((r) => r.times))].sort() };
 }
@@ -263,8 +270,8 @@ async function pickCourt(deps: AgentDeps, turn: Turn, value: string) {
  */
 export async function prepareBookingSummary(deps: AgentDeps, ctx: { companyId: string; phone: string; context: Record<string, unknown>; bot: AgentBot; paymentRequired: boolean }, a: { court: Court; day: string; startTime: string; minutes: number; customerName: string; customerEmail: string }): Promise<{ erro: string } | { reply: string }> {
   // Regra da quadra (horas cheias, horário nobre): explica ao cliente em vez de dizer que está ocupado.
-  const ruleRow = (await db.select({ rules: courts.bookingRules }).from(courts).where(eq(courts.id, a.court.id)).limit(1))[0];
-  const startMin = Number(a.startTime.slice(0, 2)) * 60 + Number(a.startTime.slice(3)), issue = ruleProblem(parseCourtRules(ruleRow?.rules), new Date(`${a.day}T12:00:00Z`).getUTCDay(), startMin, startMin + a.minutes);
+  const ruleRow = (await db.select({ rules: courts.bookingRules, locationName: courts.locationName, locationAddress: courts.locationAddress, locationMapsUrl: courts.locationMapsUrl }).from(courts).where(eq(courts.id, a.court.id)).limit(1))[0];
+  const weekday = new Date(`${a.day}T12:00:00Z`).getUTCDay(), startMin = Number(a.startTime.slice(0, 2)) * 60 + Number(a.startTime.slice(3)), issue = ruleProblem(parseCourtRules(ruleRow?.rules), weekday, startMin, startMin + a.minutes, await deps.openingMinutes(ctx.companyId, weekday));
   if (issue) return { reply: `${ruleProblemText(issue, a.court.name)} ${issue.kind === 'start' ? 'Qual horário você prefere?' : 'Qual duração você prefere?'}` };
   const free = await deps.availability(ctx.companyId, a.court.id, a.day, a.minutes), slot = free.slots.find((x) => x.inicio === a.startTime);
   if (!slot) return { erro: 'Esse horário não está livre nessa quadra. Ofereça os horários livres dela com consultar_horarios.' };
@@ -284,7 +291,7 @@ export async function prepareBookingSummary(deps: AgentDeps, ctx: { companyId: s
   const pending: PendingBooking = { courtId: a.court.id, courtName: a.court.name, date: a.day, startTime: a.startTime, durationMinutes: a.minutes, customerName: a.customerName, customerEmail: a.customerEmail, amountCents: slot.amountCents, createdAt: new Date().toISOString() };
   ctx.context.pendingBooking = pending;
   const end = deps.timeHH(Number(a.startTime.slice(0, 2)) * 60 + Number(a.startTime.slice(3)) + a.minutes);
-  return { reply: `📝 Confira seu pedido:\n\n🏟️ Quadra: ${a.court.name}\n📅 Data: ${displayDate(a.day)}\n🕒 Horário: ${a.startTime} às ${end}\n⏱️ Duração: ${durationLabel(a.minutes)}\n💰 Valor total: ${slot.valor}\n${ctx.paymentRequired ? `💳 Pix agora: ${pix}` : '👤 O pagamento é feito na arena.'}\n\nConfirma a reserva?` };
+  return { reply: `📝 Confira seu pedido:\n\n🏟️ Quadra: ${a.court.name}\n${ruleRow && hasOwnLocation(ruleRow) ? `📍 Local: ${courtPlaceText(ruleRow)}${ruleRow.locationMapsUrl ? `\n🗺️ ${ruleRow.locationMapsUrl}` : ''}\n` : ''}📅 Data: ${displayDate(a.day)}\n🕒 Horário: ${a.startTime} às ${end}\n⏱️ Duração: ${durationLabel(a.minutes)}\n💰 Valor total: ${slot.valor}\n${ctx.paymentRequired ? `💳 Pix agora: ${pix}` : '👤 O pagamento é feito na arena.'}\n\nConfirma a reserva?` };
 }
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -357,7 +364,7 @@ function buildTools(deps: AgentDeps, t: Turn, courtNames: string[]) {
   const empty = z.object({});
 
   const tools = [
-    define('consultar_informacoes_arena', 'Consulta endereço, localização, Instagram e link de avaliação cadastrados. Use ao perguntarem informações da arena; nunca invente links.', empty,
+    define('consultar_informacoes_arena', 'Consulta endereço, localização, Instagram e link de avaliação cadastrados. Use ao perguntarem informações da arena; nunca invente links. Se vier quadras_em_outro_endereco, essas quadras ficam no endereço delas: informe o endereço da quadra do cliente.', empty,
       async (_args, turn) => arenaInformation(turn.companyId)),
     define('enviar_fotos_quadra', 'Envia fotos reais da quadra quando o cliente pedir; "todas" envia as de todas as quadras. O sistema envia as fotos e a mensagem final; não escreva nada.', z.object({ quadra: z.enum(['todas', ...courtNames]) }),
       async (args, turn) => {

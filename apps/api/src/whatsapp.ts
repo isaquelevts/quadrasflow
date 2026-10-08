@@ -13,7 +13,7 @@ import { botPaused, DEFAULT_OUTSIDE_HOURS_MESSAGE, isOutsideHumanHours, LEGACY_O
 import { activeCourts, confirmPendingBooking, saveClientEmail, dayScheduleReply, sendCourtPhotos, listFreeCourts, prepareBookingSummary, priceReply, runWhatsAppAgent, type AgentDeps, type PendingBooking } from './whatsapp-agent.js';
 import { durationLabel, parseTimeDuration, type Duration } from './whatsapp-court-search.js';
 import { testPhoneMatches } from './whatsapp-test-mode.js';
-import { parseCourtRules, ruleProblem, ruleProblemText } from './court-rules.js';
+import { firstStart, parseCourtRules, ruleProblem, ruleProblemText } from './court-rules.js';
 import { DATE_QUESTION, NAME_QUESTION, endOptionsText, parseEndAnswer, isAllCourts, isCancelIntent, isRescheduleIntent, rescheduleSummary, rescheduledText, pickBooking, type BookingOption, isGreeting, isPhotoRequest, photoQuestion, isPeriodOnly, isPriceQuestion, isReserveIntent, isTimesQuestion, matchCourt, mentionsDate as saysDate, parseBareTime, parsePeriod, timeUnavailableText, welcomeMenu } from './whatsapp-flow.js';
 import { durationChoices, durationError, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { asksChange, confirmsCancellation, confirmsSummary, isBareNumber } from './whatsapp-confirm.js';
@@ -92,11 +92,13 @@ async function transcribeWhatsAppAudio(media:Record<string,unknown>):Promise<str
 function validDate(day:string){if(!/^\d{4}-\d{2}-\d{2}$/.test(day))return false;const d=new Date(`${day}T12:00:00Z`);return !Number.isNaN(d.valueOf())&&d.toISOString().slice(0,10)===day;}
 async function resolveCourt(companyId:string,name:string){const normalized=name.trim().toLocaleLowerCase('pt-BR');if(!normalized)return undefined;const list=await db.select().from(courts).where(and(eq(courts.companyId,companyId),eq(courts.active,true))).orderBy(asc(courts.name));return list.find(c=>c.id===name)||list.find(c=>c.name.toLocaleLowerCase('pt-BR')===normalized)||list.find(c=>c.name.toLocaleLowerCase('pt-BR').includes(normalized));}
 /** Duração máxima por reserva configurada pela arena (Configurações → Horários). */
+/** Abertura do dia em minutos (base da grade de 2h/3h). */
+async function openingMinutes(companyId:string,weekday:number){const hour=(await db.select({openTime:companyHours.openTime}).from(companyHours).where(and(eq(companyHours.companyId,companyId),eq(companyHours.weekday,weekday))).limit(1))[0];return hour?Number(hour.openTime.slice(0,2))*60+Number(hour.openTime.slice(3)):0;}
 async function arenaMaxDuration(companyId:string){const row=(await db.select({publicOptions:companies.publicOptions}).from(companies).where(eq(companies.id,companyId)).limit(1))[0];return maxDurationOf(row?.publicOptions);}
 /** A reserva pedida fere uma regra da quadra (horas cheias, horário nobre)? Devolve a explicação para o cliente. */
 async function courtRuleIssue(courtId:string,day:string,start:string,minutes:number){
- const court=(await db.select({name:courts.name,rules:courts.bookingRules}).from(courts).where(eq(courts.id,courtId)).limit(1))[0];if(!court)return null;
- const s=Number(start.slice(0,2))*60+Number(start.slice(3)),problem=ruleProblem(parseCourtRules(court.rules),new Date(`${day}T12:00:00Z`).getUTCDay(),s,s+minutes);
+ const court=(await db.select({name:courts.name,rules:courts.bookingRules,companyId:courts.companyId}).from(courts).where(eq(courts.id,courtId)).limit(1))[0];if(!court)return null;
+ const weekday=new Date(`${day}T12:00:00Z`).getUTCDay(),s=Number(start.slice(0,2))*60+Number(start.slice(3)),problem=ruleProblem(parseCourtRules(court.rules),weekday,s,s+minutes,await openingMinutes(court.companyId,weekday));
  return problem?{problem,text:ruleProblemText(problem,court.name)}:null;
 }
 /** Inícios livres de uma quadra no dia. `exclude`: reserva que está sendo remarcada (não conta como ocupada). */
@@ -107,7 +109,7 @@ async function availability(companyId:string,courtId:string,day:string,duration:
  const hour=(await db.select().from(companyHours).where(and(eq(companyHours.companyId,companyId),eq(companyHours.weekday,new Date(`${day}T12:00:00Z`).getUTCDay()))).limit(1))[0];if(!hour?.isOpen)return {open:false,slots:[]};
  const opening=Number(hour.openTime.slice(0,2))*60+Number(hour.openTime.slice(3)),closing=Number(hour.closeTime.slice(0,2))*60+Number(hour.closeTime.slice(3)),[nh,nm]=today.time.split(':').map(Number),minimum=day===today.date?Math.max(opening,Math.ceil((nh!*60+nm!)/30)*30):opening;
  const weekday=new Date(`${day}T12:00:00Z`).getUTCDay(),[busy,blocks,members,tariffs,court]=await Promise.all([db.select().from(bookings).where(and(eq(bookings.companyId,companyId),eq(bookings.courtId,courtId),ne(bookings.status,'cancelled'),exclude?ne(bookings.id,exclude):undefined,gte(bookings.startAt,`${day}T00:00:00.000Z`),lt(bookings.startAt,`${day}T24:00:00.000Z`))),db.select().from(blockedSlots).where(and(eq(blockedSlots.companyId,companyId),eq(blockedSlots.courtId,courtId),gte(blockedSlots.startAt,`${day}T00:00:00.000Z`),lt(blockedSlots.startAt,`${day}T24:00:00.000Z`))),db.select().from(monthlyMembers).where(and(eq(monthlyMembers.companyId,companyId),eq(monthlyMembers.courtId,courtId),eq(monthlyMembers.weekday,weekday),eq(monthlyMembers.status,'active'))),db.select({weekday:companyPriceSlots.weekday,startTime:companyPriceSlots.startTime,endTime:companyPriceSlots.endTime,priceCents:companyPriceSlots.priceCents}).from(companyPriceSlots).where(eq(companyPriceSlots.companyId,companyId)),db.select().from(courts).where(and(eq(courts.companyId,companyId),eq(courts.id,courtId),eq(courts.active,true))).limit(1)]);
- if(!court[0])throw new Error('Não encontrei essa quadra ativa.');const rules=parseCourtRules(court[0].bookingRules),slots:AvailabilitySlot[]=[];/* regras da quadra: só horas cheias e horário nobre */for(let minute=Math.ceil(minimum/rules.step)*rules.step;minute+duration<=closing;minute+=rules.step){if(ruleProblem(rules,weekday,minute,minute+duration))continue;const start=`${day}T${timeHH(minute)}:00.000Z`,end=`${day}T${timeHH(minute+duration)}:00.000Z`;const recurring=members.some(member=>{const from=Number(member.startTime.slice(0,2))*60+Number(member.startTime.slice(3));return from<minute+duration&&from+member.durationMinutes>minute;});if(!recurring&&![...busy,...blocks].some(x=>x.startAt<end&&x.endAt>start)){const cents=bookingAmountCents(start,end,court[0].priceCents,tariffs),value=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(cents/100);slots.push({inicio:timeHH(minute),valor:value,amountCents:cents});}}
+ if(!court[0])throw new Error('Não encontrei essa quadra ativa.');const rules=parseCourtRules(court[0].bookingRules),slots:AvailabilitySlot[]=[];/* regras da quadra: só horas cheias e horário nobre */for(let minute=firstStart(rules,minimum,opening);minute+duration<=closing;minute+=rules.step){if(ruleProblem(rules,weekday,minute,minute+duration,opening))continue;const start=`${day}T${timeHH(minute)}:00.000Z`,end=`${day}T${timeHH(minute+duration)}:00.000Z`;const recurring=members.some(member=>{const from=Number(member.startTime.slice(0,2))*60+Number(member.startTime.slice(3));return from<minute+duration&&from+member.durationMinutes>minute;});if(!recurring&&![...busy,...blocks].some(x=>x.startAt<end&&x.endAt>start)){const cents=bookingAmountCents(start,end,court[0].priceCents,tariffs),value=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(cents/100);slots.push({inicio:timeHH(minute),valor:value,amountCents:cents});}}
  return {open:true,quadra:court[0].name,slots};
 }
 function previewSlots(slots:AvailabilitySlot[],period:string){
@@ -116,7 +118,10 @@ function previewSlots(slots:AvailabilitySlot[],period:string){
  const selected=period==='manha'||period==='tarde'||period==='noite'?groups[period]:slots;
  return {slots:selected,counts,total:selected.length};
 }
+/** Quadra em blocos de 2h/3h: a duração pedida sobe para o bloco da quadra (1h → 2h), senão nenhum horário caberia. */
+async function courtDuration(courtId:string,duration:number){const row=(await db.select({rules:courts.bookingRules}).from(courts).where(eq(courts.id,courtId)).limit(1))[0],step=parseCourtRules(row?.rules).step;return step>60&&duration%step?Math.ceil(duration/step)*step:duration;}
 async function availableTimesReply(companyId:string,courtId:string,day:string,duration=60,period='todos'){
+ duration=await courtDuration(courtId,duration);
  const free=await availability(companyId,courtId,day,duration),preview=previewSlots(free.slots,period);
  if(!free.open)return `A arena está fechada em ${displayDate(day)}. Qual outro dia você prefere?`;
  if(!preview.total)return `Não encontrei horários livres de ${durationLabel(duration)} em ${displayDate(day)}. Prefere outro dia ou outra duração?`;
@@ -145,7 +150,7 @@ async function createConfirmedBooking(companyId:string,phone:string,pending:Pend
  });
 }
 async function saveConversationState(companyId:string,phone:string,step:string,context:Record<string,unknown>){const now=new Date().toISOString();await db.insert(whatsappConversations).values({companyId,phone,step,context,updatedAt:now}).onConflictDoUpdate({target:[whatsappConversations.companyId,whatsappConversations.phone],set:{step,context,updatedAt:now}});}
-const agentDeps:AgentDeps={botConfig,mercadoPagoConnected,availability,previewSlots,availableTimesReply,resolveCourt,createConfirmedBooking,sendBookingPix,timeHH};
+const agentDeps:AgentDeps={botConfig,mercadoPagoConnected,availability,previewSlots,availableTimesReply,resolveCourt,createConfirmedBooking,sendBookingPix,timeHH,openingMinutes,courtDuration};
 async function callOpenAi(companyId:string,session:string,phone:string,context:Record<string,unknown>,message:string,canConfirm:boolean,receivedAt:Date){
  return runWhatsAppAgent(agentDeps,{companyId,session,phone,context,message,canConfirm,receivedAt});
 }

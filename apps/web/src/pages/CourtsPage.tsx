@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Banknote, CalendarCheck2, CalendarDays, Clock, Gauge, LandPlot, LoaderCircle, Pencil, Plus, Timer, Trash2 } from 'lucide-react';
+import { Banknote, CalendarCheck2, CalendarDays, Clock, Gauge, LandPlot, LoaderCircle, MapPin, Pencil, Plus, Timer, Trash2 } from 'lucide-react';
 import { addDays, startOfWeek } from 'date-fns';
 import { toast } from 'sonner';
 import { ArenaImagePicker } from '@/components/ArenaImagePicker';
@@ -19,7 +19,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { api } from '@/lib/api';
 import {
-  activeBookings, bookingMinutes, dateFromKey, fetchArenaBasics, fetchDay, isActiveCourt, keyOf, openWindow, todayKey,
+  activeBookings, bookingMinutes, courtPlace, dateFromKey, fetchArenaBasics, fetchDay, isActiveCourt, keyOf, openWindow, todayKey,
   type Court, type DayData, type HoursDay,
 } from '@/lib/arena';
 import { errorMessage, formatCurrency, minutesOf, plural, timeOfMinutes } from '@/lib/format';
@@ -128,7 +128,8 @@ function CourtCard({ court, today, opening, occ, isAdmin, onEdit, onToggle }: { 
     <div className="flex flex-1 flex-col p-4 lg:p-5">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0"><h3 className="truncate text-base font-semibold">{court.name}</h3>
-          <p className="flex items-center gap-1 text-[12.5px] text-muted-foreground"><Clock className="size-3" aria-hidden="true" />{opening ? `Hoje, ${opening.openTime} às ${opening.closeTime}` : 'Arena fechada hoje'}</p></div>
+          <p className="flex items-center gap-1 text-[12.5px] text-muted-foreground"><Clock className="size-3" aria-hidden="true" />{opening ? `Hoje, ${opening.openTime} às ${opening.closeTime}` : 'Arena fechada hoje'}</p>
+          {courtPlace(court) && <p className="mt-0.5 flex items-start gap-1 text-[12.5px] text-muted-foreground"><MapPin className="mt-0.5 size-3 shrink-0" aria-hidden="true" /><span className="line-clamp-2">{courtPlace(court)}</span></p>}</div>
         <div className="text-right"><div className="text-[11px] text-muted-foreground">por hora</div><div className="text-lg leading-tight font-semibold tabular-nums">{formatCurrency(court.price_cents)}</div></div>
       </div>
       {opening && <div className="mt-4">
@@ -177,6 +178,8 @@ function CourtSheet({ court, onClose, onSaved }: { court: Court | 'new' | null; 
   const [sport, setSport] = useState('Society');
   const [price, setPrice] = useState('150,00');
   const [photo, setPhoto] = useState<string[]>([]);
+  const [ownPlace, setOwnPlace] = useState(false);
+  const [place, setPlace] = useState({ name: '', address: '', maps_url: '' });
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -188,14 +191,17 @@ function CourtSheet({ court, onClose, onSaved }: { court: Court | 'new' | null; 
     setName(editing?.name || ''); setSport(editing?.sport || 'Society');
     setPrice(editing ? (editing.price_cents / 100).toFixed(2).replace('.', ',') : '150,00');
     setPhoto(editing?.photo_url ? [editing.photo_url] : []); setError('');
+    setPlace({ name: editing?.location?.name || '', address: editing?.location?.address || '', maps_url: editing?.location?.maps_url || '' }); setOwnPlace(Boolean(editing?.location?.address));
   }, [court]);
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setError('');
     const cents = Math.round(Number(price.replace(/\./g, '').replace(',', '.')) * 100);
     if (!Number.isFinite(cents) || cents < 0) { setError('Confira o preço por hora.'); return; }
+    if (ownPlace && place.address.trim().length < 5) { setError('Informe o endereço da quadra ou desmarque "Fica em outro endereço".'); return; }
     setSaving(true);
-    const body = JSON.stringify({ name: name.trim(), sport, priceCents: cents, photoUrl: photo[0] || null });
+    const location = ownPlace ? { name: place.name.trim(), address: place.address.trim(), mapsUrl: place.maps_url.trim() } : { name: '', address: '', mapsUrl: '' };
+    const body = JSON.stringify({ name: name.trim(), sport, priceCents: cents, photoUrl: photo[0] || null, location });
     try {
       if (editing) await api(`/api/courts/${editing.id}`, { method: 'PUT', body });
       else await api('/api/courts', { method: 'POST', body });
@@ -218,6 +224,18 @@ function CourtSheet({ court, onClose, onSaved }: { court: Court | 'new' | null; 
       <div className="grid gap-1.5"><Label htmlFor="court-price">Preço por hora</Label>
         <div className="relative"><span className="absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground">R$</span><Input id="court-price" className="h-10 pl-9 tabular-nums" inputMode="decimal" required value={price} onChange={(event) => setPrice(event.target.value)} /></div>
         <span className="text-[12px] text-muted-foreground">Usado quando a tabela de preços da arena não cobre o horário.</span></div>
+      <div className="grid gap-3 rounded-lg border p-3">
+        <label className="flex cursor-pointer items-start justify-between gap-3">
+          <span><span className="block text-sm font-medium">Fica em outro endereço</span><span className="block text-[12px] text-muted-foreground">Desligado: a quadra fica no endereço da arena.</span></span>
+          <Switch checked={ownPlace} onCheckedChange={setOwnPlace} aria-label="Quadra em outro endereço" />
+        </label>
+        {ownPlace && <>
+          <div className="grid gap-1.5"><Label htmlFor="court-place-name">Nome do local <span className="font-normal text-muted-foreground">(opcional)</span></Label><Input id="court-place-name" className="h-10" maxLength={80} placeholder="Ex.: Unidade Centro" value={place.name} onChange={(event) => setPlace((p) => ({ ...p, name: event.target.value }))} /></div>
+          <div className="grid gap-1.5"><Label htmlFor="court-place-address">Endereço</Label><Input id="court-place-address" className="h-10" maxLength={200} placeholder="Rua, número, bairro, cidade" value={place.address} onChange={(event) => setPlace((p) => ({ ...p, address: event.target.value }))} /></div>
+          <div className="grid gap-1.5"><Label htmlFor="court-place-maps">Link do Google Maps <span className="font-normal text-muted-foreground">(opcional)</span></Label><Input id="court-place-maps" className="h-10" type="url" inputMode="url" maxLength={1000} placeholder="https://maps.app.goo.gl/…" value={place.maps_url} onChange={(event) => setPlace((p) => ({ ...p, maps_url: event.target.value }))} /></div>
+          <span className="text-[12px] text-muted-foreground">Aparece na página de reservas e o bot do WhatsApp informa esse endereço para quem reservar esta quadra.</span>
+        </>}
+      </div>
       <p className="rounded-md bg-muted/70 px-3 py-2.5 text-[12.5px] text-muted-foreground">O horário de funcionamento vale para todas as quadras e é ajustado em Configurações.</p>
       {editing && <div className="border-t pt-4">
         <Button type="button" variant="outline" className="h-10 w-full border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 hover:text-rose-800" onClick={() => setConfirmDelete(true)}><Trash2 /> Excluir quadra</Button>

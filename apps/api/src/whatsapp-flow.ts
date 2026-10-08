@@ -165,12 +165,12 @@ export function noCourtsMessage(a: { start: string | null; reason: 'passou' | 'o
 }
 
 /** Horários livres por quadra (com o esporte), quando o cliente pede para ver os horários do dia ou de um período. */
-export function dayScheduleMessage(a: { dayLabel: string; period: Period | null; durationText: string | null; courts: ReadonlyArray<{ name: string; sport: string; times: readonly string[] }> }) {
+export function dayScheduleMessage(a: { dayLabel: string; period: Period | null; durationText: string | null; courts: ReadonlyArray<{ name: string; sport: string; times: readonly string[]; block?: string | null }> }) {
   const where = a.period ? ` ${PERIOD_LABEL[a.period]}` : '';
   const withTimes = a.courts.filter((c) => c.times.length).sort((x, y) => y.times.length - x.times.length);
   if (!withTimes.length) return `📅 ${a.dayLabel}. Não tenho horários livres${where}${a.durationText ? ` para ${a.durationText}` : ''} nesse dia. Quer ver ${a.period ? 'outro período ou ' : ''}outro dia? 😊`;
   const MAX_COURTS = 6, shown = new Set(withTimes.slice(0, MAX_COURTS));
-  const blocks = a.courts.filter((c) => !c.times.length || shown.has(c)).map((c) => c.times.length ? `🏟️ ${c.name} · ${c.sport}\n${timesLine(c.times)}` : `🏟️ ${c.name} · ${c.sport} — sem horários livres${where}`);
+  const blocks = a.courts.filter((c) => !c.times.length || shown.has(c)).map((c) => c.times.length ? `🏟️ ${c.name} · ${c.sport}${c.block ? ` (reservas de ${c.block})` : ''}\n${timesLine(c.times)}` : `🏟️ ${c.name} · ${c.sport} — sem horários livres${where}`);
   const more = withTimes.length - shown.size;
   return `📅 ${a.dayLabel}. Horários livres${where}${a.durationText ? ` para ${a.durationText}` : ''}:\n\n${blocks.join('\n\n')}${more > 0 ? `\n\nTem mais ${more} ${more === 1 ? 'quadra' : 'quadras'} com horários livres; me diz o horário que eu mostro.` : ''}\n\nQue horas você quer jogar e por quanto tempo? 🙂`;
 }
