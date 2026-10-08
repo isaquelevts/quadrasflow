@@ -9,7 +9,9 @@ export type Court = { id: string; name: string; sport: string; price_cents: numb
 export type CourtLocation = { name: string; address: string; maps_url: string };
 export const courtPlace = (court: Pick<Court, 'location'>) => court.location?.address ? (court.location.name ? `${court.location.name} — ${court.location.address}` : court.location.address) : '';
 export type HoursDay = { weekday: number; is_open: boolean | number; open_time: string; close_time: string };
-export type DayBooking = { id: string; customer_name: string; customer_phone?: string | null; start_at: string; end_at: string; amount_cents: number; status: string; source?: string; court_name: string; court_id: string; sport: string };
+export type DayBooking = { id: string; customer_name: string; customer_phone?: string | null; start_at: string; end_at: string; amount_cents: number; status: string; source?: string; court_name: string; court_id: string; sport: string; slot_id?: string; member_id?: string; monthly_day?: string; moved_from?: string | null };
+/** Tela de Mensalistas já aberta na falta/remarcação daquela data do horário fixo. */
+export const monthlyDayLink = (b: Pick<DayBooking, 'slot_id' | 'monthly_day'>) => b.slot_id && b.monthly_day ? `/mensalistas?horario=${b.slot_id}&dia=${b.monthly_day}` : '/mensalistas';
 export type Block = { id: string; reason: string; start_at: string; end_at: string; court_name: string; court_id: string };
 export type DayData = { date: string; bookings: DayBooking[]; blocks: Block[] };
 export type AwaitingPayment = { id: string; customerName: string; customerPhone?: string | null; courtName: string; startAt: string; endAt: string; amountCents: number; paymentExpiresAt: string | null };

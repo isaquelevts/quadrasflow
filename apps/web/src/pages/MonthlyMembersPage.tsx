@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { CalendarDays, ChevronLeft, ChevronRight, CircleCheck, CircleX, Clock, Hourglass, Info, LandPlot, LoaderCircle, MessageCircle, Pause, Pencil, Play, Plus, Receipt, Repeat, Trash2, TrendingUp } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthProvider';
 import { addMonths, format, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
@@ -17,6 +17,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { DatePicker } from '@/components/DatePicker';
 import { api } from '@/lib/api';
 import { isActiveCourt, todayKey, type Court } from '@/lib/arena';
 import { errorMessage, formatCurrency, formatPhone, minutesOfTime, plural, timeOfMinutes } from '@/lib/format';
@@ -24,7 +25,10 @@ import { cn } from '@/lib/utils';
 
 type Client = { id: string; name: string; phone: string | null };
 type Slot = { id?: string; court_id: string; court_name?: string; weekday: number; start_time: string; duration_minutes: number };
-type Member = { id: string; clientId: string; client_name: string; phone: string | null; amount_cents: number; due_day: number; auto_charge: boolean; status: 'active' | 'paused' | 'ended'; created_at: string; slots: Slot[] };
+/** Falta ("skip") ou remarcação ("move") de uma data só do horário fixo. */
+type Exception = { id: string; slot_id: string; day: string; kind: 'skip' | 'move'; new_day: string | null; new_start_time: string | null; new_duration_minutes: number | null; new_court_id: string | null; new_court_name: string | null; note: string };
+type Member = { id: string; clientId: string; client_name: string; phone: string | null; amount_cents: number; due_day: number; auto_charge: boolean; status: 'active' | 'paused' | 'ended'; created_at: string; slots: Slot[]; exceptions: Exception[] };
+type DayTarget = { member: Member; slot: Slot; day: string };
 type Charge = { id: string; memberId: string; client_name: string; court_name: string; cycle: string; amount_cents: number; due_date: string; paid_at: string | null };
 
 const DAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
@@ -47,6 +51,9 @@ function datesIn(cycle: string, weekday: number) {
 }
 /** Todas as datas do mês em que o plano joga (um plano pode ter vários dias da semana). */
 const gamesIn = (cycle: string, slots: Array<Pick<Slot, 'weekday'>>) => slots.flatMap((s) => datesIn(cycle, s.weekday)).sort();
+/** Cada data do mês com o horário fixo correspondente. */
+const occurrencesIn = (cycle: string, slots: Slot[]) => slots.flatMap((slot) => datesIn(cycle, slot.weekday).map((day) => ({ day, slot }))).sort((a, b) => a.day.localeCompare(b.day) || a.slot.start_time.localeCompare(b.slot.start_time));
+const dm = (day: string) => `${day.slice(8)}/${day.slice(5, 7)}`;
 const chargeStatus = (charge: Charge): { label: string; tone: Tone } => charge.paid_at ? { label: 'Pago', tone: 'green' } : charge.due_date < todayKey() ? { label: 'Atrasada', tone: 'rose' } : { label: 'Pendente', tone: 'amber' };
 
 type Confirm = { title: string; text: string; action: string; danger?: boolean; run: () => Promise<void> } | null;
@@ -66,6 +73,18 @@ export function MonthlyMembersPage() {
   const [showEnded, setShowEnded] = useState(false);
   const [confirm, setConfirm] = useState<Confirm>(null);
   const [busy, setBusy] = useState(false);
+  const [dayTarget, setDayTarget] = useState<DayTarget | null>(null);
+  // Vindo da agenda ("Faltar ou remarcar este dia"): abre o mês da data e, depois de carregar, o diálogo do dia.
+  const [search, setSearch] = useSearchParams();
+  const linkSlot = search.get('horario'), linkDay = search.get('dia');
+  useEffect(() => { if (linkDay && /^\d{4}-\d{2}-\d{2}$/.test(linkDay)) setCycle(linkDay.slice(0, 7)); }, [linkDay]);
+  useEffect(() => {
+    if (!linkSlot || !linkDay || loading || cycle !== linkDay.slice(0, 7)) return;
+    const member = members.find((m) => m.slots.some((s) => s.id === linkSlot));
+    const slot = member?.slots.find((s) => s.id === linkSlot);
+    if (member && slot) setDayTarget({ member, slot, day: linkDay });
+    setSearch({}, { replace: true });
+  }, [linkSlot, linkDay, loading, members, cycle]);
 
   // A Recepção só consulta mensalistas; para ela o "+" abre uma nova reserva.
   usePrimaryAction(() => isAdmin ? setFormOpen(true) : navigate('/reservas?nova=1'));
@@ -125,7 +144,7 @@ export function MonthlyMembersPage() {
           <h2 className="min-w-0 flex-1 text-[15px] font-semibold">Planos recorrentes <span className="ml-1 rounded-full bg-muted px-2 py-0.5 align-middle text-[11px] font-semibold text-muted-foreground">{active.length + paused.length}</span></h2>
           {ended.length > 0 && <Button variant="ghost" size="sm" onClick={() => setShowEnded((v) => !v)} aria-pressed={showEnded} aria-label={showEnded ? 'Ocultar encerrados' : `Mostrar encerrados (${ended.length})`}>{showEnded ? 'Ocultar encerrados' : <><span className="sm:hidden">Encerrados ({ended.length})</span><span className="hidden sm:inline">Mostrar encerrados ({ended.length})</span></>}</Button>}
         </div>
-        {visible.length ? <ul className="divide-y">{visible.map((m) => <PlanRow key={m.id} member={m} cycle={cycle} busy={busy} isAdmin={isAdmin} onEdit={() => setEditingMember(m)}
+        {visible.length ? <ul className="divide-y">{visible.map((m) => <PlanRow key={m.id} member={m} cycle={cycle} busy={busy} isAdmin={isAdmin} onEdit={() => setEditingMember(m)} onDay={(slot, day) => setDayTarget({ member: m, slot, day })}
           onPause={() => void setStatus(m, m.status === 'active' ? 'paused' : 'active', m.status === 'active' ? 'Plano pausado — horários liberados na agenda' : 'Plano retomado')}
           onEnd={() => setConfirm({ title: `Encerrar o plano de ${m.client_name}?`, text: 'Os horários futuros são liberados na agenda. As cobranças já pagas continuam no histórico.', action: 'Encerrar plano', danger: true, run: () => setStatus(m, 'ended', 'Plano encerrado') })} />)}</ul>
           : <EmptyState icon={Repeat} title="Nenhum mensalista ainda" text="Cadastre os horários fixos da semana (um ou vários dias). A cobrança do mês é gerada automaticamente." action={isAdmin ? <Button onClick={() => setFormOpen(true)}><Plus /> Novo mensalista</Button> : undefined} />}
@@ -154,6 +173,7 @@ export function MonthlyMembersPage() {
       </Panel>
     </>}
 
+    <DayDialog target={dayTarget} courts={courts.filter(isActiveCourt)} onClose={() => setDayTarget(null)} onSaved={() => { setDayTarget(null); void load(); }} />
     <MemberSheet open={formOpen || Boolean(editingMember)} member={editingMember} onOpenChange={(open) => { if (!open) { setFormOpen(false); setEditingMember(null); } }} cycle={cycle} courts={courts.filter(isActiveCourt)} clients={clients}
       onClientCreated={(client) => setClients((list) => [...list, client].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')))} onSaved={() => { setFormOpen(false); setEditingMember(null); void load(); }} />
     <AlertDialog open={Boolean(confirm)} onOpenChange={(value) => { if (!value) setConfirm(null); }}>
@@ -171,8 +191,8 @@ export function MonthlyMembersPage() {
   </div>;
 }
 
-function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd }: { member: Member; cycle: string; busy: boolean; isAdmin: boolean; onEdit: () => void; onPause: () => void; onEnd: () => void }) {
-  const dates = gamesIn(cycle, m.slots), today = todayKey(), idle = m.status !== 'active';
+function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd, onDay }: { member: Member; cycle: string; busy: boolean; isAdmin: boolean; onEdit: () => void; onPause: () => void; onEnd: () => void; onDay: (slot: Slot, day: string) => void }) {
+  const dates = occurrencesIn(cycle, m.slots), today = todayKey(), idle = m.status !== 'active';
   return <li className={cn('flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:px-5', idle && 'bg-muted/40')}>
     <div className="flex min-w-0 items-center gap-3 lg:w-64">
       <Avatar name={m.client_name} className="size-10" />
@@ -188,11 +208,16 @@ function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd }: { 
         <span className="inline-flex items-center gap-1.5 text-muted-foreground"><LandPlot className="size-4" aria-hidden="true" />{s.court_name}</span>
       </li>)}</ul>
       {m.status !== 'ended' && <div className="mt-2 flex flex-wrap gap-1.5">
-        {dates.map((d) => {
-          const past = d < today, isToday = d === today;
-          return <span key={d} className={cn('rounded-md border px-2 py-0.5 text-[11.5px] font-medium tabular-nums', isToday ? 'border-brand-900 bg-brand-900 text-white' : past ? 'border-border bg-muted text-muted-foreground line-through decoration-muted-foreground/40' : 'border-brand-100 bg-white text-brand-700')}>{d.slice(8)}/{d.slice(5, 7)}{isToday ? ' · hoje' : ''}</span>;
+        {dates.map(({ day: d, slot }) => {
+          const past = d < today, isToday = d === today, ex = m.exceptions.find((e) => e.slot_id === slot.id && e.day === d);
+          const label = `${DAYS[slot.weekday]} ${dm(d)} às ${slot.start_time} na ${slot.court_name}${ex?.kind === 'skip' ? ': não vem' : ex?.kind === 'move' ? `: remarcado para ${dm(ex.new_day!)} às ${ex.new_start_time}` : ''}`;
+          const tone = ex?.kind === 'skip' ? 'border-amber-200 bg-amber-50 text-amber-800' : ex?.kind === 'move' ? 'border-sky-200 bg-sky-50 text-sky-800' : isToday ? 'border-brand-900 bg-brand-900 text-white' : past ? 'border-border bg-muted text-muted-foreground line-through decoration-muted-foreground/40' : 'border-brand-100 bg-white text-brand-700';
+          const text = <>{dm(d)}{ex?.kind === 'skip' ? ' · não vem' : ex?.kind === 'move' ? ` → ${dm(ex.new_day!)} ${ex.new_start_time}` : isToday ? ' · hoje' : ''}</>;
+          return past || m.status !== 'active'
+            ? <span key={`${slot.id}-${d}`} aria-label={label} className={cn('rounded-md border px-2 py-0.5 text-[11.5px] font-medium tabular-nums', tone)}>{text}</span>
+            : <button key={`${slot.id}-${d}`} type="button" aria-label={`${label}. Faltar ou remarcar`} title="Faltar ou remarcar este dia" onClick={() => onDay(slot, d)} className={cn('rounded-md border px-2 py-0.5 text-[11.5px] font-medium tabular-nums transition hover:border-brand-500 hover:shadow-xs', tone)}>{text}</button>;
         })}
-        <span className="ml-1 self-center text-[11.5px] text-muted-foreground">{plural(dates.length, 'jogo', 'jogos')} · {formatCurrency(dates.length ? m.amount_cents / dates.length : 0)}/jogo</span>
+        <span className="ml-1 self-center text-[11.5px] text-muted-foreground">{plural(dates.length, 'jogo', 'jogos')} · {formatCurrency(dates.length ? m.amount_cents / dates.length : 0)}/jogo{m.status === 'active' && ' · toque numa data para faltar ou remarcar'}</span>
       </div>}
     </div>
     <div className="flex items-center gap-2 lg:justify-end">
@@ -318,5 +343,62 @@ function MemberSheet({ open, member, onOpenChange, cycle, courts, clients, onCli
       </div>
       {error && <p role="alert" className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">{error}</p>}
     </form>
+  </ResponsiveSheet>;
+}
+
+/** Uma data do horário fixo: "não vem" (libera o horário) ou "remarcar só este dia"; com alteração, mostra e permite desfazer. */
+function DayDialog({ target, courts, onClose, onSaved }: { target: DayTarget | null; courts: Court[]; onClose: () => void; onSaved: () => void }) {
+  const [mode, setMode] = useState<'skip' | 'move'>('skip');
+  const [newDay, setNewDay] = useState('');
+  const [courtId, setCourtId] = useState('');
+  const [start, setStart] = useState(19 * 60);
+  const [end, setEnd] = useState(20 * 60);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const ex = target ? target.member.exceptions.find((e) => e.slot_id === target.slot.id && e.day === target.day) : undefined;
+  useEffect(() => {
+    if (!target) return;
+    const s = minutesOfTime(target.slot.start_time);
+    setMode('skip'); setNewDay(target.day); setCourtId(target.slot.court_id); setStart(s); setEnd(s + target.slot.duration_minutes); setError('');
+  }, [target]);
+  useEffect(() => { if (end <= start || end - start > 480) setEnd(start + (target?.slot.duration_minutes ?? 60)); }, [start, end]);
+  if (!target) return null;
+  const { member, slot, day } = target, when = `${DAYS[slot.weekday]}, ${dm(day)} · ${slot.start_time}–${timeOfMinutes(minutesOfTime(slot.start_time) + slot.duration_minutes)} · ${slot.court_name}`;
+  async function save() {
+    setSaving(true); setError('');
+    try {
+      if (ex) { await api(`/api/monthly-members/${member.id}/exceptions/${ex.id}`, { method: 'DELETE' }); toast.success('Horário fixo de volta neste dia'); }
+      else {
+        await api(`/api/monthly-members/${member.id}/exceptions`, { method: 'POST', body: JSON.stringify(mode === 'skip' ? { slotId: slot.id, day, kind: 'skip' } : { slotId: slot.id, day, kind: 'move', newDay, courtId, startTime: timeOfMinutes(start), durationMinutes: end - start }) });
+        toast.success(mode === 'skip' ? 'Horário liberado só neste dia' : 'Jogo remarcado só nesta semana');
+      }
+      onSaved();
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setSaving(false); }
+  }
+  return <ResponsiveSheet open onOpenChange={(open) => { if (!open) onClose(); }} title={member.client_name} description={when}
+    footer={<div className="grid grid-cols-2 gap-2">
+      <Button type="button" variant="outline" className="h-10" onClick={onClose}>Voltar</Button>
+      <Button type="button" className="h-10" disabled={saving || (!ex && mode === 'move' && !newDay)} onClick={() => void save()}>{saving && <LoaderCircle className="animate-spin" />}{ex ? 'Desfazer alteração' : mode === 'skip' ? 'Liberar este dia' : 'Remarcar'}</Button>
+    </div>}>
+    <div className="space-y-4 px-5 py-4">
+      {ex ? <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[13px] text-amber-900">
+        {ex.kind === 'skip' ? <>Marcado como <b>não vem</b> neste dia. O horário está livre para outras reservas.</> : <>Remarcado para <b>{DAYS[new Date(`${ex.new_day}T12:00:00`).getDay()].toLowerCase()}, {dm(ex.new_day!)}, {ex.new_start_time}–{timeOfMinutes(minutesOfTime(ex.new_start_time!) + ex.new_duration_minutes!)}</b> na {ex.new_court_name}.</>}
+        <span className="mt-1 block text-[12px]">Desfazer devolve o horário fixo deste dia (se ainda estiver livre).</span></p>
+        : <>
+          <Segmented label="O que aconteceu" value={mode} onChange={setMode} className="grid w-full grid-cols-2" options={[{ value: 'skip', label: 'Não vem neste dia' }, { value: 'move', label: 'Remarcar só este dia' }]} />
+          {mode === 'skip' ? <p className="text-[13px] text-muted-foreground">O horário fica livre só em {dm(day)} para outras reservas (agenda, página e WhatsApp). As outras semanas continuam iguais e a mensalidade não muda.</p>
+            : <div className="grid gap-3">
+              <div className="grid gap-1.5"><Label>Nova data</Label><DatePicker value={newDay} onChange={setNewDay} label="Nova data" className="h-10 w-full" /></div>
+              <div className="grid gap-1.5"><Label>Quadra</Label><Select value={courtId} onValueChange={setCourtId}><SelectTrigger className="h-10 w-full" aria-label="Quadra da remarcação"><SelectValue /></SelectTrigger><SelectContent>{courts.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} · {c.sport}</SelectItem>)}</SelectContent></Select></div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="grid gap-1.5"><Label>Início</Label><Select value={String(start)} onValueChange={(v) => setStart(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Início da remarcação"><SelectValue /></SelectTrigger><SelectContent>{TIMES.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
+                <div className="grid gap-1.5"><Label>Fim</Label><Select value={String(end)} onValueChange={(v) => setEnd(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Fim da remarcação"><SelectValue /></SelectTrigger><SelectContent>{Array.from({ length: 15 }, (_, i) => start + 60 + i * 30).filter((t) => t <= 24 * 60).map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
+              </div>
+              <p className="text-[12.5px] text-muted-foreground">Só esta semana muda: {dm(day)} fica livre e o novo horário fica reservado para {member.client_name}.</p>
+            </div>}
+        </>}
+      {error && <p role="alert" className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">{error}</p>}
+    </div>
   </ResponsiveSheet>;
 }

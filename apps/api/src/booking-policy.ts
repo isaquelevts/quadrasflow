@@ -39,10 +39,17 @@ export async function saveBookingPolicy(companyId: string, policy: BookingPolicy
   });
 }
 
+async function arenaTimeZone(companyId: string) {
+  const row = (await db.select({ settings: integrationSettings.settings }).from(integrationSettings).where(and(eq(integrationSettings.companyId, companyId), eq(integrationSettings.provider, 'whatsapp_bot'))).limit(1))[0];
+  return String((row?.settings as { timeZone?: string } | undefined)?.timeZone || '');
+}
 /** "Hoje" no fuso da arena (configurado no bot do WhatsApp; sem ele, São Paulo). */
 export async function arenaToday(companyId: string, instant = new Date()) {
-  const row = (await db.select({ settings: integrationSettings.settings }).from(integrationSettings).where(and(eq(integrationSettings.companyId, companyId), eq(integrationSettings.provider, 'whatsapp_bot'))).limit(1))[0];
-  return dayIn(String((row?.settings as { timeZone?: string } | undefined)?.timeZone || ''), instant);
+  return dayIn(await arenaTimeZone(companyId), instant);
+}
+/** Hora atual (HH:MM) no fuso da arena. */
+export async function arenaNowTime(companyId: string, instant = new Date()) {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: (await arenaTimeZone(companyId)) || 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(instant);
 }
 
 const brl = (cents: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);

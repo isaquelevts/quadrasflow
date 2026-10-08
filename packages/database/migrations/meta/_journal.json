@@ -71,6 +71,13 @@
       "when": 1791500630386,
       "tag": "0009_monthly_slots",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791501802764,
+      "tag": "0010_monthly_exceptions",
+      "breakpoints": true
     }
   ]
 }

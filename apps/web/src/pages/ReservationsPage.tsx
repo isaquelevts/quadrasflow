@@ -16,7 +16,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
-  activeBookings, bookingMinutes, fetchArenaBasics, fetchAwaitingPayment, fetchDay, fmtDate, isActiveCourt, openWindow, todayKey,
+  activeBookings, bookingMinutes, fetchArenaBasics, fetchAwaitingPayment, fetchDay, fmtDate, isActiveCourt, monthlyDayLink, openWindow, todayKey,
   type AwaitingPayment, type Court, type DayBooking, type HoursDay,
 } from '@/lib/arena';
 import { durationLabel, errorMessage, formatCurrency, formatPhone, formatTime, plural, whatsappLink } from '@/lib/format';
@@ -273,7 +273,7 @@ function RowMenu({ booking, onView, onEdit, onPix, onCancel, bordered }: { booki
       <DropdownMenuItem onSelect={onView}><Eye />Ver detalhes</DropdownMenuItem>
       {isActionable(booking.status) && <DropdownMenuItem onSelect={onEdit}><Pencil />Editar</DropdownMenuItem>}
       {wa && <DropdownMenuItem asChild><a href={wa} target="_blank" rel="noreferrer"><MessageCircle />Chamar no WhatsApp</a></DropdownMenuItem>}
-      {booking.status === 'monthly' && <DropdownMenuItem asChild><Link to="/mensalistas"><Repeat />Ver mensalista</Link></DropdownMenuItem>}
+      {booking.status === 'monthly' && <DropdownMenuItem asChild><Link to={monthlyDayLink(booking)}><Repeat />Faltar ou remarcar este dia</Link></DropdownMenuItem>}
       {booking.status === 'pending' && <DropdownMenuItem onSelect={onPix}><QrCode />Gerar link Pix</DropdownMenuItem>}
       {isActionable(booking.status) && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={onCancel}><X />Cancelar reserva</DropdownMenuItem></>}
     </DropdownMenuContent>

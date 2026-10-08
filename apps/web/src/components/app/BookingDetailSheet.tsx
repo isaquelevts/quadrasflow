@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { ResponsiveSheet } from '@/components/app/ResponsiveSheet';
 import { BookingStatusBadge, ToneBadge, isActionable } from '@/components/app/status';
 import { Button } from '@/components/ui/button';
-import { fmtDate, type Block, type DayBooking } from '@/lib/arena';
+import { fmtDate, monthlyDayLink, type Block, type DayBooking } from '@/lib/arena';
 import { durationLabel, formatCurrency, formatPhone, formatTime, minutesOf, whatsappLink } from '@/lib/format';
 
 export type DetailItem = { kind: 'booking'; booking: DayBooking } | { kind: 'block'; block: Block };
@@ -45,7 +45,7 @@ export function BookingDetailSheet({ item, onClose, busy, onEdit, onConfirm, onC
     title={<span className="capitalize">{booking?.customer_name}</span>} description={booking && <BookingStatusBadge status={booking.status} />}
     footer={booking && <div className="space-y-2">
       {wa && <Button asChild className="h-10 w-full"><a href={wa} target="_blank" rel="noreferrer"><MessageCircle /> Chamar no WhatsApp</a></Button>}
-      {monthly && <Button asChild variant="outline" className="h-10 w-full"><Link to="/mensalistas"><Repeat /> Ver mensalista</Link></Button>}
+      {monthly && <Button asChild variant="outline" className="h-10 w-full"><Link to={monthlyDayLink(booking)}><Repeat /> Faltar ou remarcar este dia</Link></Button>}
       {actionable && <div className="grid grid-cols-3 gap-2">
         <Button variant="outline" className="h-10" disabled={busy} onClick={() => onEdit(booking)}><Pencil />Editar</Button>
         {booking.status === 'pending'
@@ -56,7 +56,7 @@ export function BookingDetailSheet({ item, onClose, busy, onEdit, onConfirm, onC
       {booking.status === 'pending' && <Button variant="ghost" className="h-10 w-full" disabled={busy} onClick={() => onPix(booking)}><QrCode /> Gerar link Pix</Button>}
     </div>}>
     {booking && <div className="divide-y px-5">
-      <Row icon={Calendar} label="Data"><span className="capitalize">{fmtDate(booking.start_at.slice(0, 10), 'EEE, dd/MM/yyyy')}</span></Row>
+      <Row icon={Calendar} label="Data"><span className="capitalize">{fmtDate(booking.start_at.slice(0, 10), 'EEE, dd/MM/yyyy')}</span>{booking.moved_from && <span className="ml-1 font-normal text-muted-foreground">· remarcado de {fmtDate(booking.moved_from, 'dd/MM')}</span>}</Row>
       <Row icon={Clock} label="Horário"><span className="tabular-nums">{formatTime(booking.start_at)} – {formatTime(booking.end_at)} <span className="font-normal text-muted-foreground">· {durationLabel(minutesOf(booking.end_at) - minutesOf(booking.start_at))}</span></span></Row>
       <Row icon={LandPlot} label="Quadra">{booking.court_name} · {booking.sport}</Row>
       <Row icon={Banknote} label="Valor">{monthly ? <span className="font-normal text-muted-foreground">Mensalidade</span> : <span className={booking.status === 'cancelled' ? 'text-muted-foreground line-through' : 'tabular-nums'}>{formatCurrency(booking.amount_cents)}</span>}</Row>
