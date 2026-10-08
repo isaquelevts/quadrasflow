@@ -15,7 +15,7 @@ import {
   activeBookings, bookingMinutes, dateFromKey, fetchArenaBasics, fetchDay, fmtDate, isActiveCourt, keyOf, occupancy, openWindow, todayKey,
   type Block, type Court, type DayBooking, type DayData, type HoursDay,
 } from '@/lib/arena';
-import { errorMessage, formatCurrency, formatPhone, formatTime, minutesOf, plural, timeOfMinutes } from '@/lib/format';
+import { clockOf, errorMessage, formatCurrency, formatPhone, formatTime, minutesOf, plural, timeOfMinutes } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 const eventTone: Record<string, string> = {
@@ -153,7 +153,7 @@ export function AgendaPage() {
         }}>
           {!opening ? <div className="px-5 py-12 text-center text-[13px] text-muted-foreground">A arena não abre neste dia. Ajuste os horários em Configurações.</div>
             : !cols.length ? <div className="px-5 py-12 text-center text-[13px] text-muted-foreground">Cadastre uma quadra ativa para usar a agenda.</div>
-            : <DayGrid cols={cols} bookings={list} blocks={blocks} opening={opening} isToday={isToday} isMobile={isMobile}
+            : <DayGrid date={date} cols={cols} bookings={list} blocks={blocks} opening={opening} isToday={isToday} isMobile={isMobile}
                 onSlot={(courtId, start) => setDialog({ mode: 'booking', courtId, start })} onBooking={openBooking} onBlock={(block) => setDetail({ kind: 'block', block })} />}
         </div>
 
@@ -188,12 +188,14 @@ function Legend({ className, children }: { className: string; children: ReactNod
 }
 
 type GridProps = {
+  /** Dia de funcionamento mostrado: horários da madrugada seguinte contam como 24:00 em diante. */
+  date: string;
   cols: Court[]; bookings: DayBooking[]; blocks: Block[]; opening: { open: number; close: number }; isToday: boolean; isMobile: boolean;
   onSlot: (courtId: string, start: string) => void; onBooking: (booking: DayBooking) => void; onBlock: (block: Block) => void;
 };
 
 /** Grade de horários: cada reserva ocupa a altura da sua duração (60 px por hora; 56 no celular). */
-function DayGrid({ cols, bookings, blocks, opening, isToday, isMobile, onSlot, onBooking, onBlock }: GridProps) {
+function DayGrid({ date, cols, bookings, blocks, opening, isToday, isMobile, onSlot, onBooking, onBlock }: GridProps) {
   const H = isMobile ? 56 : 60, ppm = H / 60;
   const gridStart = Math.floor(opening.open / 60) * 60, gridEnd = Math.ceil(opening.close / 60) * 60;
   const total = (gridEnd - gridStart) * ppm;
@@ -225,23 +227,23 @@ function DayGrid({ cols, bookings, blocks, opening, isToday, isMobile, onSlot, o
 
     <div className="relative grid" style={template}>
       <div className="relative" style={{ height: total }} aria-hidden="true">
-        {Array.from({ length: (gridEnd - gridStart) / 60 }, (_, i) => <span key={i} className="absolute right-2 text-[11px] text-muted-foreground tabular-nums lg:right-3" style={{ top: i * H + 4 }}>{timeOfMinutes(gridStart + i * 60)}</span>)}
+        {Array.from({ length: (gridEnd - gridStart) / 60 }, (_, i) => <span key={i} className="absolute right-2 text-[11px] text-muted-foreground tabular-nums lg:right-3" style={{ top: i * H + 4 }}>{clockOf(gridStart + i * 60)}</span>)}
       </div>
       {cols.map((court) => {
         const evs = bookings.filter((b) => b.court_id === court.id), bls = blocks.filter((b) => b.court_id === court.id);
-        const busy = (t: number) => evs.some((e) => t < minutesOf(e.end_at) && t + 30 > minutesOf(e.start_at)) || bls.some((b) => t < minutesOf(b.end_at) && t + 30 > minutesOf(b.start_at));
+        const busy = (t: number) => evs.some((e) => t < minutesOf(e.end_at, date) && t + 30 > minutesOf(e.start_at, date)) || bls.some((b) => t < minutesOf(b.end_at, date) && t + 30 > minutesOf(b.start_at, date));
         const slots: number[] = []; for (let t = opening.open; t + 60 <= opening.close; t += 30) if (!busy(t)) slots.push(t);
         return <div key={court.id} className="relative border-l" style={lines}>
           {opening.open > gridStart && <div className="absolute inset-x-0 top-0 bg-muted/70" style={{ height: (opening.open - gridStart) * ppm }} aria-hidden="true" />}
           {opening.close < gridEnd && <div className="absolute inset-x-0 bottom-0 bg-muted/70" style={{ height: (gridEnd - opening.close) * ppm }} aria-hidden="true" />}
-          {slots.map((t) => <button key={t} type="button" onClick={() => onSlot(court.id, timeOfMinutes(t))} aria-label={`Reservar ${court.name} às ${timeOfMinutes(t)}`}
+          {slots.map((t) => <button key={t} type="button" onClick={() => onSlot(court.id, timeOfMinutes(t))} aria-label={`Reservar ${court.name} às ${clockOf(t)}`}
             className="group absolute inset-x-1 rounded-md focus-visible:outline-2 focus-visible:outline-brand-500" style={{ top: (t - gridStart) * ppm + 2, height: H / 2 - 3 }}>
             <span className="hidden h-full items-center justify-center gap-1 rounded-md border border-dashed border-brand-400 bg-brand-50/70 text-[11px] font-medium text-brand-700 opacity-0 transition group-hover:opacity-100 group-focus-visible:opacity-100 md:flex"><Plus className="size-3" aria-hidden="true" />{timeOfMinutes(t)}</span>
           </button>)}
-          {bls.map((block) => <EventCard key={block.id} tone="block" top={(minutesOf(block.start_at) - gridStart) * ppm + 2} height={(minutesOf(block.end_at) - minutesOf(block.start_at)) * ppm - 4}
+          {bls.map((block) => <EventCard key={block.id} tone="block" top={(minutesOf(block.start_at, date) - gridStart) * ppm + 2} height={(minutesOf(block.end_at, date) - minutesOf(block.start_at, date)) * ppm - 4}
             title={<><Lock className="-mt-0.5 inline size-3" aria-hidden="true" /> {block.reason || 'Bloqueado'}</>} time={`${formatTime(block.start_at)}–${formatTime(block.end_at)}`}
             ariaLabel={`Bloqueio: ${block.reason}, ${formatTime(block.start_at)} a ${formatTime(block.end_at)}, ${court.name}`} onClick={() => onBlock(block)} />)}
-          {evs.map((booking) => <EventCard key={booking.id} tone={booking.status} top={(minutesOf(booking.start_at) - gridStart) * ppm + 2} height={bookingMinutes(booking) * ppm - 4}
+          {evs.map((booking) => <EventCard key={booking.id} tone={booking.status} top={(minutesOf(booking.start_at, date) - gridStart) * ppm + 2} height={bookingMinutes(booking) * ppm - 4}
             title={booking.customer_name} badge={labelOf(booking.status)} time={`${formatTime(booking.start_at)}–${formatTime(booking.end_at)}${booking.status !== 'monthly' && booking.amount_cents ? ` · ${formatCurrency(booking.amount_cents)}` : ''}`}
             phone={booking.customer_phone ? formatPhone(booking.customer_phone) : undefined}
             ariaLabel={`${booking.customer_name}, ${formatTime(booking.start_at)} a ${formatTime(booking.end_at)}, ${court.name}, ${labelOf(booking.status)}`} onClick={() => onBooking(booking)} />)}

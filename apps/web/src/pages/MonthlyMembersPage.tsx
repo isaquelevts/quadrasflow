@@ -20,7 +20,7 @@ import { Switch } from '@/components/ui/switch';
 import { DatePicker } from '@/components/DatePicker';
 import { api } from '@/lib/api';
 import { isActiveCourt, todayKey, type Court } from '@/lib/arena';
-import { errorMessage, formatCurrency, formatPhone, minutesOfTime, plural, timeOfMinutes } from '@/lib/format';
+import { clockLabel, clockOf, errorMessage, formatCurrency, formatPhone, minutesOfTime, plural, timeOfMinutes } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 type Client = { id: string; name: string; phone: string | null };
@@ -204,15 +204,15 @@ function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd, onDa
     <div className={cn('min-w-0 flex-1', idle && 'opacity-60')}>
       <ul className="space-y-1" aria-label={`Horários de ${m.client_name}`}>{m.slots.map((s) => <li key={s.id ?? `${s.weekday}-${s.start_time}-${s.court_id}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
         <span className="inline-flex items-center gap-1.5 font-medium"><Repeat className="size-4 text-brand-600" aria-hidden="true" />{everyDay(s.weekday)}</span>
-        <span className="inline-flex items-center gap-1.5 text-muted-foreground tabular-nums"><Clock className="size-4" aria-hidden="true" />{s.start_time}–{timeOfMinutes(minutesOfTime(s.start_time) + s.duration_minutes)}</span>
+        <span className="inline-flex items-center gap-1.5 text-muted-foreground tabular-nums"><Clock className="size-4" aria-hidden="true" />{clockLabel(s.start_time)}–{clockOf(minutesOfTime(s.start_time) + s.duration_minutes)}</span>
         <span className="inline-flex items-center gap-1.5 text-muted-foreground"><LandPlot className="size-4" aria-hidden="true" />{s.court_name}</span>
       </li>)}</ul>
       {m.status !== 'ended' && <div className="mt-2 flex flex-wrap gap-1.5">
         {dates.map(({ day: d, slot }) => {
           const past = d < today, isToday = d === today, ex = m.exceptions.find((e) => e.slot_id === slot.id && e.day === d);
-          const label = `${DAYS[slot.weekday]} ${dm(d)} às ${slot.start_time} na ${slot.court_name}${ex?.kind === 'skip' ? ': não vem' : ex?.kind === 'move' ? `: remarcado para ${dm(ex.new_day!)} às ${ex.new_start_time}` : ''}`;
+          const label = `${DAYS[slot.weekday]} ${dm(d)} às ${clockLabel(slot.start_time)} na ${slot.court_name}${ex?.kind === 'skip' ? ': não vem' : ex?.kind === 'move' ? `: remarcado para ${dm(ex.new_day!)} às ${clockLabel(ex.new_start_time!)}` : ''}`;
           const tone = ex?.kind === 'skip' ? 'border-amber-200 bg-amber-50 text-amber-800' : ex?.kind === 'move' ? 'border-sky-200 bg-sky-50 text-sky-800' : isToday ? 'border-brand-900 bg-brand-900 text-white' : past ? 'border-border bg-muted text-muted-foreground line-through decoration-muted-foreground/40' : 'border-brand-100 bg-white text-brand-700';
-          const text = <>{dm(d)}{ex?.kind === 'skip' ? ' · não vem' : ex?.kind === 'move' ? ` → ${dm(ex.new_day!)} ${ex.new_start_time}` : isToday ? ' · hoje' : ''}</>;
+          const text = <>{dm(d)}{ex?.kind === 'skip' ? ' · não vem' : ex?.kind === 'move' ? ` → ${dm(ex.new_day!)} ${clockLabel(ex.new_start_time!)}` : isToday ? ' · hoje' : ''}</>;
           return past || m.status !== 'active'
             ? <span key={`${slot.id}-${d}`} aria-label={label} className={cn('rounded-md border px-2 py-0.5 text-[11.5px] font-medium tabular-nums', tone)}>{text}</span>
             : <button key={`${slot.id}-${d}`} type="button" aria-label={`${label}. Faltar ou remarcar`} title="Faltar ou remarcar este dia" onClick={() => onDay(slot, d)} className={cn('rounded-md border px-2 py-0.5 text-[11.5px] font-medium tabular-nums transition hover:border-brand-500 hover:shadow-xs', tone)}>{text}</button>;
@@ -232,7 +232,9 @@ function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd, onDa
   </li>;
 }
 
-const TIMES = Array.from({ length: 36 }, (_, i) => 360 + i * 30); // 06:00 → 23:30
+// 06:00 → 05:30 da madrugada seguinte (guardado como 29:30): arena que fica aberta depois da meia-noite.
+const TIMES = Array.from({ length: 48 }, (_, i) => 360 + i * 30);
+const timeLabel = (t: number) => `${clockOf(t)}${t >= 1440 ? ' (madrugada)' : ''}`;
 const DUE_DAYS = Array.from({ length: 31 }, (_, i) => i + 1);
 type SlotDraft = { key: number; courtId: string; weekday: number; start: number; end: number };
 let slotKey = 0;
@@ -320,8 +322,8 @@ function MemberSheet({ open, member, onOpenChange, cycle, courts, clients, onCli
               className={cn('grid h-9 place-items-center rounded-md border text-[12.5px] font-medium transition', slot.weekday === d ? 'border-brand-900 bg-brand-900 text-white' : 'hover:bg-muted')}>{DAYS[d].slice(0, 3)}</button>)}
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <Select value={String(slot.start)} onValueChange={(v) => patchSlot(slot.key, { start: Number(v) })}><SelectTrigger className="h-10 w-full tabular-nums" aria-label={`Início do horário ${index + 1}`}><SelectValue /></SelectTrigger><SelectContent>{TIMES.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select>
-            <Select value={String(slot.end)} onValueChange={(v) => patchSlot(slot.key, { end: Number(v) })}><SelectTrigger className="h-10 w-full tabular-nums" aria-label={`Fim do horário ${index + 1}`}><SelectValue /></SelectTrigger><SelectContent>{Array.from({ length: 15 }, (_, i) => slot.start + 60 + i * 30).filter((t) => t <= 24 * 60).map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select>
+            <Select value={String(slot.start)} onValueChange={(v) => patchSlot(slot.key, { start: Number(v) })}><SelectTrigger className="h-10 w-full tabular-nums" aria-label={`Início do horário ${index + 1}`}><SelectValue /></SelectTrigger><SelectContent>{TIMES.map((t) => <SelectItem key={t} value={String(t)}>{timeLabel(t)}</SelectItem>)}</SelectContent></Select>
+            <Select value={String(slot.end)} onValueChange={(v) => patchSlot(slot.key, { end: Number(v) })}><SelectTrigger className="h-10 w-full tabular-nums" aria-label={`Fim do horário ${index + 1}`}><SelectValue /></SelectTrigger><SelectContent>{Array.from({ length: 15 }, (_, i) => slot.start + 60 + i * 30).filter((t) => t <= 30 * 60).map((t) => <SelectItem key={t} value={String(t)}>{timeLabel(t)}</SelectItem>)}</SelectContent></Select>
           </div>
         </div>)}
         {slots.length < 14 && <Button type="button" variant="outline" className="h-10" onClick={() => setSlots((list) => [...list, newSlot(list.at(-1)?.courtId || courts[0]?.id || '', ((list.at(-1)?.weekday ?? 0) + 1) % 7, list.at(-1)?.start, list.at(-1)?.end)])}><Plus /> Adicionar outro dia</Button>}
@@ -363,7 +365,7 @@ function DayDialog({ target, courts, onClose, onSaved }: { target: DayTarget | n
   }, [target]);
   useEffect(() => { if (end <= start || end - start > 480) setEnd(start + (target?.slot.duration_minutes ?? 60)); }, [start, end]);
   if (!target) return null;
-  const { member, slot, day } = target, when = `${DAYS[slot.weekday]}, ${dm(day)} · ${slot.start_time}–${timeOfMinutes(minutesOfTime(slot.start_time) + slot.duration_minutes)} · ${slot.court_name}`;
+  const { member, slot, day } = target, when = `${DAYS[slot.weekday]}, ${dm(day)} · ${clockLabel(slot.start_time)}–${clockOf(minutesOfTime(slot.start_time) + slot.duration_minutes)} · ${slot.court_name}`;
   async function save() {
     setSaving(true); setError('');
     try {
@@ -383,7 +385,7 @@ function DayDialog({ target, courts, onClose, onSaved }: { target: DayTarget | n
     </div>}>
     <div className="space-y-4 px-5 py-4">
       {ex ? <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[13px] text-amber-900">
-        {ex.kind === 'skip' ? <>Marcado como <b>não vem</b> neste dia. O horário está livre para outras reservas.</> : <>Remarcado para <b>{DAYS[new Date(`${ex.new_day}T12:00:00`).getDay()].toLowerCase()}, {dm(ex.new_day!)}, {ex.new_start_time}–{timeOfMinutes(minutesOfTime(ex.new_start_time!) + ex.new_duration_minutes!)}</b> na {ex.new_court_name}.</>}
+        {ex.kind === 'skip' ? <>Marcado como <b>não vem</b> neste dia. O horário está livre para outras reservas.</> : <>Remarcado para <b>{DAYS[new Date(`${ex.new_day}T12:00:00`).getDay()].toLowerCase()}, {dm(ex.new_day!)}, {clockLabel(ex.new_start_time!)}–{clockOf(minutesOfTime(ex.new_start_time!) + ex.new_duration_minutes!)}</b> na {ex.new_court_name}.</>}
         <span className="mt-1 block text-[12px]">Desfazer devolve o horário fixo deste dia (se ainda estiver livre).</span></p>
         : <>
           <Segmented label="O que aconteceu" value={mode} onChange={setMode} className="grid w-full grid-cols-2" options={[{ value: 'skip', label: 'Não vem neste dia' }, { value: 'move', label: 'Remarcar só este dia' }]} />
@@ -392,8 +394,8 @@ function DayDialog({ target, courts, onClose, onSaved }: { target: DayTarget | n
               <div className="grid gap-1.5"><Label>Nova data</Label><DatePicker value={newDay} onChange={setNewDay} label="Nova data" className="h-10 w-full" /></div>
               <div className="grid gap-1.5"><Label>Quadra</Label><Select value={courtId} onValueChange={setCourtId}><SelectTrigger className="h-10 w-full" aria-label="Quadra da remarcação"><SelectValue /></SelectTrigger><SelectContent>{courts.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} · {c.sport}</SelectItem>)}</SelectContent></Select></div>
               <div className="grid grid-cols-2 gap-2">
-                <div className="grid gap-1.5"><Label>Início</Label><Select value={String(start)} onValueChange={(v) => setStart(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Início da remarcação"><SelectValue /></SelectTrigger><SelectContent>{TIMES.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
-                <div className="grid gap-1.5"><Label>Fim</Label><Select value={String(end)} onValueChange={(v) => setEnd(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Fim da remarcação"><SelectValue /></SelectTrigger><SelectContent>{Array.from({ length: 15 }, (_, i) => start + 60 + i * 30).filter((t) => t <= 24 * 60).map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
+                <div className="grid gap-1.5"><Label>Início</Label><Select value={String(start)} onValueChange={(v) => setStart(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Início da remarcação"><SelectValue /></SelectTrigger><SelectContent>{TIMES.map((t) => <SelectItem key={t} value={String(t)}>{timeLabel(t)}</SelectItem>)}</SelectContent></Select></div>
+                <div className="grid gap-1.5"><Label>Fim</Label><Select value={String(end)} onValueChange={(v) => setEnd(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Fim da remarcação"><SelectValue /></SelectTrigger><SelectContent>{Array.from({ length: 15 }, (_, i) => start + 60 + i * 30).filter((t) => t <= 30 * 60).map((t) => <SelectItem key={t} value={String(t)}>{timeLabel(t)}</SelectItem>)}</SelectContent></Select></div>
               </div>
               <p className="text-[12.5px] text-muted-foreground">Só esta semana muda: {dm(day)} fica livre e o novo horário fica reservado para {member.client_name}.</p>
             </div>}

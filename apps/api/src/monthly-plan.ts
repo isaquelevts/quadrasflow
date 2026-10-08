@@ -2,7 +2,8 @@
 
 export type PlanSlot = { courtId: string; weekday: number; startTime: string; durationMinutes: number };
 export const MAX_SLOTS = 14;
-const HHMM = /^([01]\d|2[0-3]):(00|30)$/;
+// Início de 00:00 a 29:30: depois de 23:30 é a madrugada seguinte, no dia de funcionamento do horário fixo.
+const HHMM = /^([01]\d|2\d):(00|30)$/;
 const toMin = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
 
 /** Dia de vencimento válido: 1 a 31 (em mês mais curto, cai no último dia). */

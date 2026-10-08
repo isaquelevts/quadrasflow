@@ -8,6 +8,7 @@ import type { AuthUser } from './auth.js';
 import { bookingAmountCents } from './pricing.js';
 import { parseCourtRules, validateCourtRules } from './court-rules.js';
 import { locationJson, NO_LOCATION, validateCourtLocation } from './court-location.js';
+import { dayRange, EXTENDED_HHMM, hoursProblem, operatingDayOf, toMin, wallIso } from './operating-day.js';
 import { maxDurationOf, validMaxDuration } from './booking-duration.js';
 import { findMonthlyConflict, monthlyBusyOn, monthlyConflictMessage } from './monthly-conflict.js';
 import { changeBookingStatus, syncBookingReceivable, type BookingStatus } from './booking-finance.js';
@@ -57,8 +58,9 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     if (courtDrafts.length < 1 || courtDrafts.length > 15 || hoursDraft.length !== 7) throw fail(400, 'Complete os dados das quadras e dos sete dias de funcionamento.');
     const normalizedCourts = courtDrafts.map((c) => ({ name: text(c.name, 'o nome da quadra'), sport: text(c.sport || (Array.isArray(c.sports) ? c.sports[0] : ''), 'a modalidade'), sports: Array.isArray(c.sports) ? c.sports.map(String).slice(0, 20) : [String(c.sport)], surface: String(c.surface || '').slice(0, 60), covering: String(c.covering || '').slice(0, 40), players: Math.trunc(Number(c.players)) }));
     if (normalizedCourts.some((c) => c.players < 2 || c.players > 100) || new Set(normalizedCourts.map((c) => c.name.toLocaleLowerCase('pt-BR'))).size !== normalizedCourts.length) throw fail(400, 'Confira o nome e o número de jogadores de cada quadra.');
-    const normalizedHours = hoursDraft.map((h) => { const weekday = Number(h.weekday), openTime = String(h.openTime || ''), closeTime = String(h.closeTime || ''), isOpen = h.isOpen === true; if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6 || !/^([01]\d|2[0-3]):(00|30)$/.test(openTime) || !/^([01]\d|2[0-3]):(00|30)$/.test(closeTime) || (isOpen && closeTime <= openTime)) throw fail(400, 'Confira os horários de funcionamento.'); return { weekday, openTime, closeTime, isOpen }; });
+    const normalizedHours = hoursDraft.map((h) => { const weekday = Number(h.weekday), openTime = String(h.openTime || ''), closeTime = String(h.closeTime || ''), isOpen = h.isOpen === true; if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6 || !/^([01]\d|2[0-3]):(00|30)$/.test(openTime) || !EXTENDED_HHMM.test(closeTime) || (isOpen && toMin(closeTime) <= toMin(openTime))) throw fail(400, 'Confira os horários de funcionamento.'); return { weekday, openTime, closeTime, isOpen }; });
     if (new Set(normalizedHours.map((h) => h.weekday)).size !== 7 || !normalizedHours.some((h) => h.isOpen)) throw fail(400, 'Selecione pelo menos um dia aberto para a arena.');
+    const hoursIssue = hoursProblem(normalizedHours); if (hoursIssue) throw fail(400, hoursIssue);
     const phone = digits(company.phone), zip = digits(company.zipCode), cancellationHours = Number(company.cancellationHours), cancellationFeePercent = Number(company.cancellationFeePercent);
     if (phone.length < 10 || phone.length > 15 || zip.length !== 8 || !validBrazilianUf(company.state) || !Number.isInteger(cancellationHours) || cancellationHours < 0 || cancellationHours > 48 || !Number.isInteger(cancellationFeePercent) || cancellationFeePercent < 0 || cancellationFeePercent > 20) throw fail(400, 'Confira o telefone, endereço, UF e as políticas da arena.');
     const photos = Array.isArray(company.photos) ? company.photos.map(String).filter(Boolean).slice(0, 6) : [];
@@ -90,7 +92,9 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const user = adminOf(request), companyId = companyOf(request), body = bodyOf(request), input = Array.isArray(body.weeklyHours) ? body.weeklyHours as Array<Record<string, unknown>> : [];
     if (input.length !== 7) throw fail(400, 'Configure os sete dias da semana.');
     const normalized = input.map((h) => ({ weekday: Number(h.weekday), isOpen: h.isOpen === true, openTime: String(h.openTime || ''), closeTime: String(h.closeTime || '') }));
-    if (new Set(normalized.map((d) => d.weekday)).size !== 7 || normalized.some((d) => d.weekday < 0 || d.weekday > 6 || !/^([01]\d|2[0-3]):(00|30)$/.test(d.openTime) || !/^([01]\d|2[0-3]):(00|30)$/.test(d.closeTime) || (d.isOpen && d.closeTime <= d.openTime))) throw fail(400, 'Use intervalos de 30 minutos e confira abertura e fechamento.');
+    if (new Set(normalized.map((d) => d.weekday)).size !== 7 || normalized.some((d) => d.weekday < 0 || d.weekday > 6 || !/^([01]\d|2[0-3]):(00|30)$/.test(d.openTime) || !EXTENDED_HHMM.test(d.closeTime) || (d.isOpen && toMin(d.closeTime) <= toMin(d.openTime)))) throw fail(400, 'Use intervalos de 30 minutos e confira abertura e fechamento.');
+    // Fechamento pode passar da meia-noite ("26:00" = 02:00), até 06:00, sem invadir a abertura do dia seguinte.
+    const hoursIssue = hoursProblem(normalized); if (hoursIssue) throw fail(400, hoursIssue);
     // Duração máxima por reserva (página pública e WhatsApp); opcional para não quebrar quem só salva os horários.
     const maxDuration = body.maxDurationMinutes === undefined ? undefined : Number(body.maxDurationMinutes);
     if (maxDuration !== undefined && !validMaxDuration(maxDuration)) throw fail(400, 'A duração máxima deve ser de 1h a 8h, de 30 em 30 minutos.');
@@ -243,23 +247,24 @@ export async function registerArenaRoutes(app: FastifyInstance) {
   });
   app.get('/api/bookings', auth, async (request) => {
     const companyId = companyOf(request), query = request.query as { date?: string }, day = validDay(query.date || spDay());
-    const [rows, blockRows, members] = await Promise.all([db.select({ booking: bookings, courtName: courts.name, sport: courts.sport }).from(bookings).innerJoin(courts, eq(bookings.courtId, courts.id)).where(and(eq(bookings.companyId, companyId), gte(bookings.startAt, `${day}T00:00:00.000Z`), lt(bookings.startAt, `${day}T24:00:00.000Z`))).orderBy(asc(bookings.startAt)), db.select({ block: blockedSlots, courtName: courts.name, sport: courts.sport }).from(blockedSlots).innerJoin(courts, eq(blockedSlots.courtId, courts.id)).where(and(eq(blockedSlots.companyId, companyId), gte(blockedSlots.startAt, `${day}T00:00:00.000Z`), lt(blockedSlots.startAt, `${day}T24:00:00.000Z`))).orderBy(asc(blockedSlots.startAt)), monthlyBusyOn(db, companyId, day)]);
+    // O dia mostra o seu funcionamento inteiro: inclui a madrugada seguinte e deixa de fora a que pertence ao dia anterior.
+    const range = dayRange(await getCompanyHours(companyId), day);
+    const [rows, blockRows, members] = await Promise.all([db.select({ booking: bookings, courtName: courts.name, sport: courts.sport }).from(bookings).innerJoin(courts, eq(bookings.courtId, courts.id)).where(and(eq(bookings.companyId, companyId), gte(bookings.startAt, range.fromIso), lt(bookings.startAt, range.toIso))).orderBy(asc(bookings.startAt)), db.select({ block: blockedSlots, courtName: courts.name, sport: courts.sport }).from(blockedSlots).innerJoin(courts, eq(blockedSlots.courtId, courts.id)).where(and(eq(blockedSlots.companyId, companyId), gte(blockedSlots.startAt, range.fromIso), lt(blockedSlots.startAt, range.toIso))).orderBy(asc(blockedSlots.startAt)), monthlyBusyOn(db, companyId, day)]);
     const regular = rows.map(({ booking: b, courtName, sport }) => ({ id: b.id, customer_name: b.customerName, customer_phone: b.customerPhone, start_at: b.startAt, end_at: b.endAt, amount_cents: b.amountCents, status: b.status, source: b.source, court_id: b.courtId, court_name: courtName, sport }));
-    const hhmm = (total: number) => `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-    const recurring = members.map((m) => ({ id: `monthly-${m.slotId}-${m.originalDay}`, member_id: m.memberId, slot_id: m.slotId, monthly_day: m.originalDay, moved_from: m.moved ? m.originalDay : null, customer_name: m.clientName, customer_phone: m.clientPhone, start_at: `${day}T${hhmm(m.start)}:00.000Z`, end_at: `${day}T${hhmm(m.end)}:00.000Z`, amount_cents: m.amountCents, status: 'monthly', source: 'monthly', court_id: m.courtId, court_name: m.courtName, sport: m.sport }));
+    const recurring = members.map((m) => ({ id: `monthly-${m.slotId}-${m.originalDay}`, member_id: m.memberId, slot_id: m.slotId, monthly_day: m.originalDay, moved_from: m.moved ? m.originalDay : null, customer_name: m.clientName, customer_phone: m.clientPhone, start_at: wallIso(m.day, m.start), end_at: wallIso(m.day, m.end), amount_cents: m.amountCents, status: 'monthly', source: 'monthly', court_id: m.courtId, court_name: m.courtName, sport: m.sport }));
     return { bookings: [...regular, ...recurring].sort((a, b) => a.start_at.localeCompare(b.start_at)), blocks: blockRows.map(({ block: b, courtName, sport }) => ({ id: b.id, reason: b.reason, start_at: b.startAt, end_at: b.endAt, court_id: b.courtId, court_name: courtName, sport })) };
   });
 
   async function saveBooking(request: FastifyRequest, input: Record<string, unknown>, source: string) {
     const user = userOf(request), companyId = companyOf(request), courtId = String(input.courtId || ''), customerName = text(input.customerName, 'o nome do cliente'), phone = digits(input.customerPhone), startAt = iso(input.startAt), endAt = iso(input.endAt), start = Date.parse(startAt), end = Date.parse(endAt), duration = (end - start) / 60000;
     if (phone && (phone.length < 10 || phone.length > 15)) throw fail(400, 'Confira o telefone do cliente.');
-    if (startAt.slice(0, 10) !== endAt.slice(0, 10) || start % 1800000 !== 0 || duration < 60 || duration % 30) throw fail(400, 'Use blocos de 30 minutos e duração mínima de 1 hora.');
+    if (start % 1800000 !== 0 || duration < 60 || duration > 1440 || duration % 30) throw fail(400, 'Use blocos de 30 minutos e duração mínima de 1 hora.');
     const createdAt = new Date().toISOString();
     const result = await db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${companyId}), hashtext(${courtId}))`);
       const q = (await tx.select().from(courts).where(and(eq(courts.id, courtId), eq(courts.companyId, companyId), eq(courts.active, true))).limit(1))[0]; if (!q) throw fail(404, 'A quadra não está disponível.');
-      const weekday = new Date(`${startAt.slice(0, 10)}T12:00:00Z`).getUTCDay(), hour = (await tx.select().from(companyHours).where(and(eq(companyHours.companyId, companyId), eq(companyHours.weekday, weekday))).limit(1))[0];
-      if (!hour?.isOpen || startAt.slice(11, 16) < hour.openTime || endAt.slice(11, 16) > hour.closeTime) throw fail(400, 'O horário escolhido está fora do funcionamento da arena.');
+      // Vale o funcionamento do dia ou, de madrugada, o do dia anterior (ex.: sexta até 02:00).
+      if (!operatingDayOf(await tx.select().from(companyHours).where(eq(companyHours.companyId, companyId)), startAt, endAt)) throw fail(400, 'O horário escolhido está fora do funcionamento da arena.');
       const conflict = await tx.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, courtId), ne(bookings.status, 'cancelled'), lt(bookings.startAt, endAt), sql`${bookings.endAt} > ${startAt}`)).limit(1);
       const block = await tx.select({ id: blockedSlots.id }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), lt(blockedSlots.startAt, endAt), sql`${blockedSlots.endAt} > ${startAt}`)).limit(1);
       if (conflict.length || block.length) throw fail(409, 'O horário escolhido já está ocupado ou bloqueado.');
@@ -282,15 +287,15 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const user = userOf(request), companyId = companyOf(request), { id } = request.params as { id: string }, body = bodyOf(request);
     const customerName = text(body.customerName, 'o nome do cliente'), phone = digits(body.customerPhone), courtId = String(body.courtId || ''), startAt = iso(body.startAt), endAt = iso(body.endAt), start = Date.parse(startAt), end = Date.parse(endAt), duration = (end - start) / 60000;
     if (phone && (phone.length < 10 || phone.length > 15)) throw fail(400, 'Confira o telefone do cliente.');
-    if (startAt.slice(0, 10) !== endAt.slice(0, 10) || start % 1800000 !== 0 || duration < 60 || duration % 30) throw fail(400, 'Use horários em blocos de 30 minutos e duração mínima de 1 hora.');
+    if (start % 1800000 !== 0 || duration < 60 || duration > 1440 || duration % 30) throw fail(400, 'Use horários em blocos de 30 minutos e duração mínima de 1 hora.');
     const updated = await db.transaction(async (tx) => {
       const current = (await tx.select().from(bookings).where(and(eq(bookings.id, id), eq(bookings.companyId, companyId), sql`${bookings.status} IN ('pending','confirmed')`)).limit(1))[0];
       if (!current) throw fail(404, 'Reserva não encontrada ou já encerrada.');
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${companyId}), hashtext(${courtId}))`);
       const court = (await tx.select().from(courts).where(and(eq(courts.id, courtId), eq(courts.companyId, companyId), eq(courts.active, true))).limit(1))[0];
       if (!court) throw fail(404, 'A quadra não está disponível.');
-      const weekday = new Date(`${startAt.slice(0, 10)}T12:00:00Z`).getUTCDay(), hour = (await tx.select().from(companyHours).where(and(eq(companyHours.companyId, companyId), eq(companyHours.weekday, weekday))).limit(1))[0];
-      if (!hour?.isOpen || startAt.slice(11, 16) < hour.openTime || endAt.slice(11, 16) > hour.closeTime) throw fail(400, 'O horário escolhido está fora do funcionamento da arena.');
+      // Vale o funcionamento do dia ou, de madrugada, o do dia anterior (ex.: sexta até 02:00).
+      if (!operatingDayOf(await tx.select().from(companyHours).where(eq(companyHours.companyId, companyId)), startAt, endAt)) throw fail(400, 'O horário escolhido está fora do funcionamento da arena.');
       const [conflict, block] = await Promise.all([
         tx.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, courtId), ne(bookings.status, 'cancelled'), sql`${bookings.id} <> ${id}`, lt(bookings.startAt, endAt), sql`${bookings.endAt} > ${startAt}`)).limit(1),
         tx.select({ id: blockedSlots.id }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), lt(blockedSlots.startAt, endAt), sql`${blockedSlots.endAt} > ${startAt}`)).limit(1),

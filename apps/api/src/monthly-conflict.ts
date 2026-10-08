@@ -1,15 +1,13 @@
 import { and, eq, gte, inArray, lte, or } from 'drizzle-orm';
 import { clients, courts, monthlyExceptions, monthlyMemberSlots, monthlyMembers } from '@quadrasflow/database';
 import type { db } from './database.js';
+import { clockOf, minutesFrom, shiftDay, wallIso, weekdayOf } from './operating-day.js';
 
 type Reader = Pick<typeof db, 'select'>;
-
-const minutesOf = (iso: string) => Number(iso.slice(11, 13)) * 60 + Number(iso.slice(14, 16));
-const timeOf = (total: number) => `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-export const weekdayOf = (day: string) => new Date(`${day}T12:00:00Z`).getUTCDay();
+export { weekdayOf };
 
 /**
- * Horário fixo de um plano ativo num dia (minutos desde 00:00).
+ * Horário fixo de um plano ativo num dia de funcionamento (minutos desde 00:00 desse dia; passa de 1440 de madrugada).
  * `originalDay`: a data do horário fixo; difere de `day` quando o jogo foi remarcado só naquela semana (`moved`).
  */
 export type MonthlyBusy = { day: string; originalDay: string; moved: boolean; memberId: string; slotId: string; courtId: string; courtName: string; sport: string; clientName: string; clientPhone: string | null; amountCents: number; start: number; end: number };
@@ -62,9 +60,11 @@ export const monthlyBusyOn = (tx: Reader, companyId: string, day: string, courtI
  * Mesma regra usada pelo bot do WhatsApp. Encostar (fim = início) não é conflito.
  */
 export async function findMonthlyConflict(tx: Reader, companyId: string, courtId: string, startAt: string, endAt: string, ignore?: Occurrence) {
-  const start = minutesOf(startAt), end = minutesOf(endAt);
-  const day = startAt.slice(0, 10), hit = (await monthlyBusyBetween(tx, companyId, day, day, courtId, ignore)).find((m) => m.start < end && m.end > start);
-  return hit ? { clientName: hit.clientName, startTime: timeOf(hit.start), endTime: timeOf(hit.end) } : null;
+  // Compara em minutos a partir do dia do início; o dia anterior entra por causa dos horários fixos que passam da meia-noite.
+  const day = startAt.slice(0, 10), start = minutesFrom(day, startAt), end = minutesFrom(day, endAt);
+  const list = await monthlyBusyBetween(tx, companyId, shiftDay(day, -1), endAt.slice(0, 10), courtId, ignore);
+  const hit = list.find((m) => { const s = minutesFrom(day, wallIso(m.day, m.start)); return s < end && s + (m.end - m.start) > start; });
+  return hit ? { clientName: hit.clientName, startTime: clockOf(hit.start), endTime: clockOf(hit.end) } : null;
 }
 
 export const monthlyConflictMessage = (conflict: { clientName: string; startTime: string; endTime: string }) =>

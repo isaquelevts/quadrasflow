@@ -12,6 +12,7 @@ import {companies,companyHours,companyPriceSlots,courts,blockedSlots,bookings,bo
 import {bookingAmountCents} from './pricing.js';
 import {parseCourtRules,ruleProblem,ruleProblemText} from './court-rules.js';
 import {hasOwnLocation} from './court-location.js';
+import {operatingDayOf} from './operating-day.js';
 import {findMonthlyConflict,monthlyConflictMessage} from './monthly-conflict.js';
 import {db} from './database.js';
 import {adminOf,companyOf,fail} from './arena.js';
@@ -123,9 +124,9 @@ export async function rescheduleOwnBooking(companyId:string,phone:string,id:stri
   if(!current)throw fail(404,'Reserva não encontrada.');
   for(const court of [...new Set([current.courtId,to.courtId])].sort())await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${companyId}),hashtext(${court}))`);
   const court=(await tx.select().from(courts).where(and(eq(courts.id,to.courtId),eq(courts.companyId,companyId),eq(courts.active,true))).limit(1))[0];if(!court)throw fail(404,'A quadra não está disponível.');
-  const weekday=new Date(`${to.startAt.slice(0,10)}T12:00:00Z`).getUTCDay(),hour=(await tx.select().from(companyHours).where(and(eq(companyHours.companyId,companyId),eq(companyHours.weekday,weekday))).limit(1))[0];
-  if(!hour?.isOpen||to.startAt.slice(11,16)<hour.openTime||to.endAt.slice(11,16)>hour.closeTime)throw fail(400,'Esse horário está fora do funcionamento da arena.');
-  const toMin=(iso:string)=>Number(iso.slice(11,13))*60+Number(iso.slice(14,16)),issue=ruleProblem(parseCourtRules(court.bookingRules),weekday,toMin(to.startAt),toMin(to.endAt),Number(hour.openTime.slice(0,2))*60+Number(hour.openTime.slice(3)));if(issue)throw fail(400,ruleProblemText(issue,court.name));
+  /* vale o funcionamento do dia ou, de madrugada, o do dia anterior */const od=operatingDayOf(await tx.select().from(companyHours).where(eq(companyHours.companyId,companyId)),to.startAt,to.endAt);
+  if(!od)throw fail(400,'Esse horário está fora do funcionamento da arena.');
+  const issue=ruleProblem(parseCourtRules(court.bookingRules),od.weekday,od.start,od.end,od.open);if(issue)throw fail(400,ruleProblemText(issue,court.name));
   const [conflict,block]=await Promise.all([tx.select({id:bookings.id}).from(bookings).where(and(eq(bookings.companyId,companyId),eq(bookings.courtId,to.courtId),ne(bookings.status,'cancelled'),ne(bookings.id,id),lt(bookings.startAt,to.endAt),sql`${bookings.endAt} > ${to.startAt}`)).limit(1),tx.select({id:blockedSlots.id}).from(blockedSlots).where(and(eq(blockedSlots.companyId,companyId),eq(blockedSlots.courtId,to.courtId),lt(blockedSlots.startAt,to.endAt),sql`${blockedSlots.endAt} > ${to.startAt}`)).limit(1)]);
   if(conflict.length||block.length)throw fail(409,'Esse horário acabou de ser ocupado.');
   const monthly=await findMonthlyConflict(tx,companyId,to.courtId,to.startAt,to.endAt);if(monthly)throw fail(409,monthlyConflictMessage(monthly));

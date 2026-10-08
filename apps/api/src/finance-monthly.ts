@@ -3,6 +3,7 @@ import { and, asc, eq, gte, lte, ne, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { appAudit, blockedSlots, bookings, clients, companyHours, courts, financeEntries, monthlyCharges, monthlyExceptions, monthlyMemberSlots, monthlyMembers } from '@quadrasflow/database';
 import { findMonthlyConflict, monthlyBusyBetween, weekdayOf, type Occurrence } from './monthly-conflict.js';
+import { clockText, minutesFrom, shiftDay, toMin, wallIso } from './operating-day.js';
 import { isUniqueViolation } from './db-errors.js';
 import { arenaNowTime, arenaToday } from './booking-policy.js';
 import { dueDateOf, parsePlanSlots, validDueDay, type PlanSlot } from './monthly-plan.js';
@@ -107,17 +108,21 @@ export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
     const { courtId, weekday, startTime, durationMinutes } = slot;
     const court = (await db.select().from(courts).where(and(eq(courts.id, courtId), eq(courts.companyId, companyId), eq(courts.active, true))).limit(1))[0];
     if (!court) throw fail(404, 'Quadra não encontrada ou pausada.');
-    const label = `${WEEKDAYS[weekday]} ${startTime} (${court.name})`;
+    const label = `${WEEKDAYS[weekday]} ${clockText(startTime)} (${court.name})`;
     const startMin = Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)), endMin = startMin + durationMinutes, hours = (await db.select().from(companyHours).where(and(eq(companyHours.companyId, companyId), eq(companyHours.weekday, weekday))).limit(1))[0];
-    if (!hours?.isOpen || startTime < hours.openTime || endMin > Number(hours.closeTime.slice(0, 2)) * 60 + Number(hours.closeTime.slice(3))) throw fail(400, `O horário de ${label} fica fora do funcionamento da arena.`);
+    if (!hours?.isOpen || startMin < toMin(hours.openTime) || endMin > toMin(hours.closeTime)) throw fail(400, `O horário de ${label} fica fora do funcionamento da arena.`);
     const existing = await db.select({ memberId: monthlyMemberSlots.memberId, startTime: monthlyMemberSlots.startTime, durationMinutes: monthlyMemberSlots.durationMinutes }).from(monthlyMemberSlots).innerJoin(monthlyMembers, eq(monthlyMemberSlots.memberId, monthlyMembers.id))
       .where(and(eq(monthlyMemberSlots.companyId, companyId), eq(monthlyMemberSlots.courtId, courtId), eq(monthlyMemberSlots.weekday, weekday), eq(monthlyMembers.status, 'active')));
     if (existing.some((m) => { if (m.memberId === ignoreMemberId) return false; const start = Number(m.startTime.slice(0, 2)) * 60 + Number(m.startTime.slice(3)); return start < endMin && start + m.durationMinutes > startMin; })) throw fail(409, `Já existe outro mensalista em ${label}.`);
     const today = new Date(`${await arenaToday(companyId)}T12:00:00Z`), end = new Date(today); end.setUTCDate(end.getUTCDate() + 90); while (today.getUTCDay() !== weekday) today.setUTCDate(today.getUTCDate() + 1);
     const candidates: string[] = []; for (const cursor = new Date(today); cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 7)) candidates.push(cursor.toISOString().slice(0, 10));
-    for (const day of candidates) { const from = `${day}T${startTime}:00.000Z`, to = new Date(Date.parse(from) + durationMinutes * 60000).toISOString(); const [conflict, block] = await Promise.all([db.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, courtId), ne(bookings.status, 'cancelled'), sql`${bookings.startAt} < ${to}`, sql`${bookings.endAt} > ${from}`)).limit(1), db.select({ id: blockedSlots.id }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), sql`${blockedSlots.startAt} < ${to}`, sql`${blockedSlots.endAt} > ${from}`)).limit(1)]); if (conflict.length || block.length) throw fail(409, `O horário de ${label} conflita com a agenda em ${day.split('-').reverse().join('/')}.`); }
-    const moved = candidates.length ? (await monthlyBusyBetween(db, companyId, candidates[0]!, candidates.at(-1)!, courtId)).find((m) => m.moved && m.memberId !== ignoreMemberId && candidates.includes(m.day) && m.start < endMin && m.end > startMin) : undefined;
-    if (moved) throw fail(409, `O horário de ${label} conflita com a remarcação de ${moved.clientName} em ${moved.day.split('-').reverse().join('/')}.`);
+    for (const day of candidates) { const from = wallIso(day, startMin), to = wallIso(day, endMin); const [conflict, block] = await Promise.all([db.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, courtId), ne(bookings.status, 'cancelled'), sql`${bookings.startAt} < ${to}`, sql`${bookings.endAt} > ${from}`)).limit(1), db.select({ id: blockedSlots.id }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), sql`${blockedSlots.startAt} < ${to}`, sql`${blockedSlots.endAt} > ${from}`)).limit(1)]); if (conflict.length || block.length) throw fail(409, `O horário de ${label} conflita com a agenda em ${day.split('-').reverse().join('/')}.`); }
+    // Outros mensalistas em tempo absoluto: pega remarcações da semana e horários que atravessam a meia-noite em outro dia da semana.
+    const others = candidates.length ? await monthlyBusyBetween(db, companyId, shiftDay(candidates[0]!, -1), shiftDay(candidates.at(-1)!, 1), courtId) : [];
+    for (const day of candidates) {
+      const hit = others.find((m) => { if (m.memberId === ignoreMemberId) return false; const s = minutesFrom(day, wallIso(m.day, m.start)); return s < endMin && s + (m.end - m.start) > startMin; });
+      if (hit) throw fail(409, hit.moved ? `O horário de ${label} conflita com a remarcação de ${hit.clientName} em ${hit.day.split('-').reverse().join('/')}.` : `Já existe outro mensalista em ${label}.`);
+    }
   }
   // Plano completo (horários, valor, vencimento e cobrança automática), validado do mesmo jeito para cadastrar e editar.
   // `current`: horários atuais do plano (ao editar); os que continuam iguais não são conferidos de novo com a agenda.
@@ -167,10 +172,9 @@ export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
   });
   // Falta ou remarcação de uma data só (a Recepção também pode marcar): as outras semanas do plano não mudam.
   const fmtDay = (day: string) => day.split('-').reverse().slice(0, 2).join('/');
-  const hhmm = (total: number) => `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
   /** O horário (dia, quadra, início, duração) está livre na agenda, fora a própria ocorrência do mensalista? */
   async function assertFree(companyId: string, courtId: string, day: string, startTime: string, durationMinutes: number, ignore: Occurrence, what: string) {
-    const from = `${day}T${startTime}:00.000Z`, to = `${day}T${hhmm(Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)) + durationMinutes)}:00.000Z`;
+    const from = wallIso(day, toMin(startTime)), to = wallIso(day, toMin(startTime) + durationMinutes);
     const [booking] = await db.select({ name: bookings.customerName }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, courtId), ne(bookings.status, 'cancelled'), sql`${bookings.startAt} < ${to}`, sql`${bookings.endAt} > ${from}`)).limit(1);
     if (booking) throw fail(409, `${what} já tem a reserva de ${booking.name}.`);
     const [block] = await db.select({ reason: blockedSlots.reason }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), sql`${blockedSlots.startAt} < ${to}`, sql`${blockedSlots.endAt} > ${from}`)).limit(1);
@@ -197,11 +201,11 @@ export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
       if (!court) throw fail(404, 'Quadra não encontrada ou pausada.');
       const last = new Date(`${today}T12:00:00Z`); last.setUTCDate(last.getUTCDate() + 90);
       if (!datePattern.test(newDay) || Number.isNaN(Date.parse(`${newDay}T12:00:00Z`)) || newDay < today || newDay > last.toISOString().slice(0, 10)) throw fail(400, 'Escolha a nova data entre hoje e os próximos 90 dias.');
-      if (!/^([01]\d|2[0-3]):(00|30)$/.test(newStartTime) || !Number.isInteger(newDurationMinutes) || newDurationMinutes < 60 || newDurationMinutes > 480 || newDurationMinutes % 30) throw fail(400, 'Confira o novo horário e a duração.');
+      if (!/^([01]\d|2\d):(00|30)$/.test(newStartTime) || !Number.isInteger(newDurationMinutes) || newDurationMinutes < 60 || newDurationMinutes > 480 || newDurationMinutes % 30) throw fail(400, 'Confira o novo horário e a duração.');
       const startMin = Number(newStartTime.slice(0, 2)) * 60 + Number(newStartTime.slice(3)), endMin = startMin + newDurationMinutes, hours = (await db.select().from(companyHours).where(and(eq(companyHours.companyId, companyId), eq(companyHours.weekday, weekdayOf(newDay)))).limit(1))[0];
-      if (!hours?.isOpen || newStartTime < hours.openTime || endMin > Number(hours.closeTime.slice(0, 2)) * 60 + Number(hours.closeTime.slice(3))) throw fail(400, 'O novo horário fica fora do funcionamento da arena.');
-      if (newDay === today && newStartTime <= (await arenaNowTime(companyId))) throw fail(400, 'Esse horário de hoje já passou.');
-      await assertFree(companyId, newCourtId, newDay, newStartTime, newDurationMinutes, { slotId, day }, `O horário de ${fmtDay(newDay)} às ${newStartTime} na ${court.name}`);
+      if (!hours?.isOpen || startMin < toMin(hours.openTime) || endMin > toMin(hours.closeTime)) throw fail(400, 'O novo horário fica fora do funcionamento da arena.');
+      if (wallIso(newDay, startMin) <= `${today}T${await arenaNowTime(companyId)}:00.000Z`) throw fail(400, 'Esse horário de hoje já passou.');
+      await assertFree(companyId, newCourtId, newDay, newStartTime, newDurationMinutes, { slotId, day }, `O horário de ${fmtDay(newDay)} às ${clockText(newStartTime)} na ${court.name}`);
       move = { newCourtId, newDay, newStartTime, newDurationMinutes };
     }
     const exceptionId = randomUUID();
@@ -216,7 +220,7 @@ export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
     if (!row) throw fail(404, 'Alteração não encontrada.');
     if (row.exception.day < await arenaToday(companyId)) throw fail(409, 'Esse dia já passou; a alteração fica no histórico.');
     // Volta ao horário fixo só se ele continua livre (alguém pode ter reservado depois da falta).
-    await assertFree(companyId, row.slot.courtId, row.exception.day, row.slot.startTime, row.slot.durationMinutes, { slotId: row.slot.id, day: row.exception.day }, `O horário fixo de ${fmtDay(row.exception.day)} às ${row.slot.startTime} na ${row.courtName}`);
+    await assertFree(companyId, row.slot.courtId, row.exception.day, row.slot.startTime, row.slot.durationMinutes, { slotId: row.slot.id, day: row.exception.day }, `O horário fixo de ${fmtDay(row.exception.day)} às ${clockText(row.slot.startTime)} na ${row.courtName}`);
     await db.delete(monthlyExceptions).where(eq(monthlyExceptions.id, exceptionId));
     await audit(companyId, user.id, 'monthly_member.day_restored', 'monthly_member', id, { slotId: row.slot.id, day: row.exception.day, kind: row.exception.kind });
     return { ok: true };

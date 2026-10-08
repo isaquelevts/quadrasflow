@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
-import { durationLabel, errorMessage, formatCurrency, formatDate, initials, whatsappLink } from '@/lib/format';
+import { durationLabel, errorMessage, formatCurrency, formatDate, initials, isoAt, minutesOf, whatsappLink } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { firstStart, minDuration, rulesOf, ruleProblem, ruleProblemText, type CourtRules } from '@/lib/court-rules';
 
@@ -96,7 +96,7 @@ function BookingPage({ slug }: { slug: string }) {
   }, [slug, weekStart, today]);
 
   const court = data?.courts.find((c) => c.id === courtId);
-  const busyFor = useCallback((id: string) => (data ? [...data.bookings, ...data.blocks].filter((b) => b.court_id === id && b.start_at.slice(0, 10) === date).map((b) => ({ start: toMin(b.start_at.slice(11, 16)), end: toMin(b.end_at.slice(11, 16)) })) : []), [data, date]);
+  const busyFor = useCallback((id: string) => (data ? [...data.bookings, ...data.blocks].filter((b) => b.court_id === id).map((b) => ({ start: minutesOf(b.start_at, date), end: minutesOf(b.end_at, date) })) : []), [data, date]);
   const open = data && data.hours.is_open ? toMin(data.hours.open_time) : 0, close = data && data.hours.is_open ? toMin(data.hours.close_time) : 0;
   const notBefore = data && date === today ? toMin(data.not_before) : 0;
   const maxDuration = data?.max_duration_minutes || 480;
@@ -118,7 +118,7 @@ function BookingPage({ slug }: { slug: string }) {
   // Preço real: faixas de preço da arena por meia hora (a noite pode custar diferente).
   const priceOf = useCallback((c: Court, s: number, e: number) => {
     const weekday = new Date(`${date}T12:00:00Z`).getUTCDay(); let total = 0;
-    for (let m = s; m < e; m += STEP) { const key = hm(m), slot = data?.prices.find((p) => p.weekday === weekday && p.start_time <= key && key < p.end_time); total += Math.round((slot?.price_cents ?? c.price_cents) / 2); }
+    for (let m = s; m < e; m += STEP) { /* madrugada: tabela do dia seguinte, como no servidor */ const key = hm(m), wd = m >= 1440 ? (weekday + 1) % 7 : weekday, slot = data?.prices.find((p) => p.weekday === wd && p.start_time <= key && key < p.end_time); total += Math.round((slot?.price_cents ?? c.price_cents) / 2); }
     return total;
   }, [data, date]);
 
@@ -149,7 +149,7 @@ function BookingPage({ slug }: { slug: string }) {
     setSaving(true);
     try {
       const r = await api<{ booking: { id: string }; payment: Payment | null }>(`/api/public/arenas/${encodeURIComponent(slug)}/bookings`, {
-        method: 'POST', body: JSON.stringify({ courtId: court.id, customerName: name.trim(), customerPhone: phone, customerEmail: email.trim(), startAt: `${date}T${hm(start)}:00.000Z`, endAt: `${date}T${hm(end)}:00.000Z` }),
+        method: 'POST', body: JSON.stringify({ courtId: court.id, customerName: name.trim(), customerPhone: phone, customerEmail: email.trim(), startAt: isoAt(date, start), endAt: isoAt(date, end) }),
       });
       setDone(r.payment ? { kind: 'pix', bookingId: r.booking.id, payment: r.payment } : { kind: 'request' });
     } catch (cause) { setFormError(errorMessage(cause)); void load(date); }
@@ -201,7 +201,7 @@ function BookingPage({ slug }: { slug: string }) {
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2"><h1 className="truncate text-2xl font-extrabold tracking-tight lg:text-4xl">{arena.name}</h1><span className="shrink-0 rounded-full bg-lime-400 px-2 py-0.5 text-[10.5px] font-semibold text-brand-950">Arena</span></div>
-            {todayHours && <div className="mt-0.5 inline-flex items-center gap-1.5 text-[12.5px] text-white/80"><span className={cn('size-1.5 rounded-full', openNow ? 'animate-pulse bg-lime-400' : 'bg-rose-400')} aria-hidden="true" />{openNow ? 'Aberta agora' : 'Fechada agora'}{todayHours.is_open ? ` · ${todayHours.open_time}–${todayHours.close_time}` : ''}</div>}
+            {todayHours && <div className="mt-0.5 inline-flex items-center gap-1.5 text-[12.5px] text-white/80"><span className={cn('size-1.5 rounded-full', openNow ? 'animate-pulse bg-lime-400' : 'bg-rose-400')} aria-hidden="true" />{openNow ? 'Aberta agora' : 'Fechada agora'}{todayHours.is_open ? ` · ${todayHours.open_time}–${hm(toMin(todayHours.close_time))}` : ''}</div>}
           </div>
           {wa && <a href={wa} target="_blank" rel="noreferrer" aria-label="WhatsApp da arena" className="grid size-11 shrink-0 place-items-center gap-2 rounded-xl bg-[#25D366] font-semibold text-white lg:inline-flex lg:h-11 lg:w-auto lg:px-4"><MessageCircle className="size-5" aria-hidden="true" /><span className="hidden lg:inline">WhatsApp</span></a>}
         </div>
@@ -263,7 +263,7 @@ function BookingPage({ slug }: { slug: string }) {
 
           <Step id="passo-inicio" n={3} title="Que horas começa?" done={start !== null ? `às ${hm(start)}` : ''} locked={!courtId} lockedText="Escolha o dia e a quadra primeiro.">
             <div className="space-y-4">
-              {([['Manhã', Sunrise, 0, 720], ['Tarde', Sun, 720, 1080], ['Noite', Moon, 1080, 1440]] as const).map(([label, Icon, a, b]) => {
+              {([['Manhã', Sunrise, 0, 720], ['Tarde', Sun, 720, 1080], ['Noite', Moon, 1080, 1440], ['Madrugada', Moon, 1440, 2880]] as const).map(([label, Icon, a, b]) => {
                 // Só inícios que ainda podem acontecer (não passados e com 1h antes de fechar); riscado = ocupado.
                 const starts = startsFor(courtId), step = rulesFor(courtId).step, slots: number[] = []; for (let t = firstStart(rulesFor(courtId), Math.max(a, open, notBefore), open); t < b && t + minDuration(rulesFor(courtId)) <= close; t += step) slots.push(t);
                 if (!slots.length) return null;

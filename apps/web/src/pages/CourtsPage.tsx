@@ -22,7 +22,7 @@ import {
   activeBookings, bookingMinutes, courtPlace, dateFromKey, fetchArenaBasics, fetchDay, isActiveCourt, keyOf, openWindow, todayKey,
   type Court, type DayData, type HoursDay,
 } from '@/lib/arena';
-import { errorMessage, formatCurrency, minutesOf, plural, timeOfMinutes } from '@/lib/format';
+import { clockOf, errorMessage, formatCurrency, minutesOf, plural } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 const SPORTS = ['Society', 'Futsal', 'Futebol de Campo', 'Beach Tennis', 'Padel', 'Tênis', 'Vôlei', 'Basquete', 'Vôlei de Praia', 'Futevôlei', 'Pickleball', 'Handebol', 'Peteca', 'Squash', 'Outro'];
@@ -112,7 +112,7 @@ function CourtCard({ court, today, opening, occ, isAdmin, onEdit, onToggle }: { 
   const blocks = today ? today.blocks.filter((b) => b.court_id === court.id) : [];
   const slots = opening ? Array.from({ length: Math.ceil((opening.close - opening.open) / 30) }, (_, i) => opening.open + i * 30) : [];
   const stateAt = (t: number) => {
-    const inRange = (s: string, e: string) => t >= minutesOf(s) && t < minutesOf(e);
+    const inRange = (s: string, e: string) => t >= minutesOf(s, today?.date) && t < minutesOf(e, today?.date);
     if (blocks.some((b) => inRange(b.start_at, b.end_at))) return 'block';
     const hit = bookings.find((b) => inRange(b.start_at, b.end_at));
     return hit ? (hit.status === 'monthly' ? 'monthly' : 'booked') : 'free';
@@ -140,7 +140,7 @@ function CourtCard({ court, today, opening, occ, isAdmin, onEdit, onToggle }: { 
         <div className="flex gap-0.5" role="img" aria-label={`Ocupação de hoje: ${occ}%`}>
           {slots.map((t) => { const s = stateAt(t); return <span key={t} className={cn('h-2 flex-1 rounded-sm', s === 'booked' ? 'bg-brand-500' : s === 'monthly' ? 'bg-lime-400' : s === 'block' ? 'bg-gray-300' : 'bg-muted')} />; })}
         </div>
-        <div className="mt-1 flex justify-between text-[10.5px] text-muted-foreground tabular-nums"><span>{opening.openTime}</span><span>{timeOfMinutes(Math.floor((opening.open + opening.close) / 60 / 2) * 60)}</span><span>{opening.closeTime}</span></div>
+        <div className="mt-1 flex justify-between text-[10.5px] text-muted-foreground tabular-nums"><span>{opening.openTime}</span><span>{clockOf(Math.floor((opening.open + opening.close) / 60 / 2) * 60)}</span><span>{opening.closeTime}</span></div>
       </div>}
       <div className="-mx-4 mt-auto flex items-center justify-end gap-2 border-t px-4 pt-4 lg:-mx-5 lg:px-5" style={{ marginTop: opening ? undefined : '1rem' }}>
         {isAdmin && <label className="mr-auto flex min-w-0 cursor-pointer items-center gap-2 text-[13px]">

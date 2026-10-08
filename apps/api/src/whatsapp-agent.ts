@@ -22,6 +22,7 @@ import { dateSaidByClient } from './whatsapp-date-guard.js';
 import { durationLabel, durationRangeText, maxDurationOf, validDuration } from './booking-duration.js';
 import { parseCourtRules, ruleProblem, ruleProblemText } from './court-rules.js';
 import { courtPlaceText, hasOwnLocation } from './court-location.js';
+import { resolveClock } from './operating-day.js';
 import { DATE_QUESTION, dayScheduleMessage, photosOutcome, isPeriodOnly, isTimesQuestion, noCourtsMessage, parsePeriod, periodOf, priceMessage, type Period } from './whatsapp-flow.js';
 import { isOutsideHumanHours, outsideHoursText, type HumanHours } from './whatsapp-handoff-rules.js';
 
@@ -41,8 +42,8 @@ export type AgentDeps = {
   createConfirmedBooking: (companyId: string, phone: string, pending: PendingBooking) => Promise<{ id: string; amountCents: number; courtName: string }>;
   sendBookingPix: (companyId: string, session: string, phone: string, bookingId: string, payerEmail: string) => Promise<string>;
   timeHH: (minutes: number) => string;
-  /** Abertura do dia em minutos (base da grade de 2h/3h das quadras). */
-  openingMinutes: (companyId: string, weekday: number) => Promise<number>;
+  /** Abertura e fechamento do dia em minutos (base da grade de 2h/3h; fechamento passa de 1440 de madrugada). */
+  dayWindow: (companyId: string, day: string) => Promise<{ open: number; close: number }>;
   /** Duração ajustada ao bloco da quadra (2h/3h); nas demais, a própria duração. */
   courtDuration: (courtId: string, minutes: number) => Promise<number>;
 };
@@ -196,9 +197,8 @@ export async function listFreeCourts(deps: AgentDeps, companyId: string, context
   clearSearch(context);
   if (!list.length && start && duration && active.length) {
     // Nenhuma quadra livre porque todas as regras barram esse pedido (ex.: 1h30 em quadras de horas cheias): explica a regra.
-    const s0 = Number(start.slice(0, 2)) * 60 + Number(start.slice(3)), weekday = new Date(`${day}T12:00:00Z`).getUTCDay();
-    const opening = await deps.openingMinutes(companyId, weekday);
-    const issues = active.map((c) => { const p = ruleProblem(parseCourtRules(c.rules), weekday, s0, s0 + duration, opening); return p ? { p, text: ruleProblemText(p, c.name) } : null; });
+    const win = await deps.dayWindow(companyId, day), s0 = resolveClock(win, start), weekday = new Date(`${day}T12:00:00Z`).getUTCDay();
+    const issues = active.map((c) => { const p = ruleProblem(parseCourtRules(c.rules), weekday, s0, s0 + duration, win.open); return p ? { p, text: ruleProblemText(p, c.name) } : null; });
     if (issues.every(Boolean)) {
       context.confirmedDate = day; context.search = { date: day, start: issues.some((i) => i!.p.kind === 'start') ? null : start, duration: null };
       return { message: `${[...new Set(issues.map((i) => i!.text))].join('\n')}\n\n${issues.some((i) => i!.p.kind === 'start') ? 'Qual horário você prefere?' : 'Qual duração você prefere?'}`, list };
@@ -271,7 +271,7 @@ async function pickCourt(deps: AgentDeps, turn: Turn, value: string) {
 export async function prepareBookingSummary(deps: AgentDeps, ctx: { companyId: string; phone: string; context: Record<string, unknown>; bot: AgentBot; paymentRequired: boolean }, a: { court: Court; day: string; startTime: string; minutes: number; customerName: string; customerEmail: string }): Promise<{ erro: string } | { reply: string }> {
   // Regra da quadra (horas cheias, horário nobre): explica ao cliente em vez de dizer que está ocupado.
   const ruleRow = (await db.select({ rules: courts.bookingRules, locationName: courts.locationName, locationAddress: courts.locationAddress, locationMapsUrl: courts.locationMapsUrl }).from(courts).where(eq(courts.id, a.court.id)).limit(1))[0];
-  const weekday = new Date(`${a.day}T12:00:00Z`).getUTCDay(), startMin = Number(a.startTime.slice(0, 2)) * 60 + Number(a.startTime.slice(3)), issue = ruleProblem(parseCourtRules(ruleRow?.rules), weekday, startMin, startMin + a.minutes, await deps.openingMinutes(ctx.companyId, weekday));
+  const win = await deps.dayWindow(ctx.companyId, a.day), weekday = new Date(`${a.day}T12:00:00Z`).getUTCDay(), startMin = resolveClock(win, a.startTime), issue = ruleProblem(parseCourtRules(ruleRow?.rules), weekday, startMin, startMin + a.minutes, win.open);
   if (issue) return { reply: `${ruleProblemText(issue, a.court.name)} ${issue.kind === 'start' ? 'Qual horário você prefere?' : 'Qual duração você prefere?'}` };
   const free = await deps.availability(ctx.companyId, a.court.id, a.day, a.minutes), slot = free.slots.find((x) => x.inicio === a.startTime);
   if (!slot) return { erro: 'Esse horário não está livre nessa quadra. Ofereça os horários livres dela com consultar_horarios.' };
@@ -290,7 +290,7 @@ export async function prepareBookingSummary(deps: AgentDeps, ctx: { companyId: s
   delete ctx.context.awaitingEmail;
   const pending: PendingBooking = { courtId: a.court.id, courtName: a.court.name, date: a.day, startTime: a.startTime, durationMinutes: a.minutes, customerName: a.customerName, customerEmail: a.customerEmail, amountCents: slot.amountCents, createdAt: new Date().toISOString() };
   ctx.context.pendingBooking = pending;
-  const end = deps.timeHH(Number(a.startTime.slice(0, 2)) * 60 + Number(a.startTime.slice(3)) + a.minutes);
+  const end = deps.timeHH(startMin + a.minutes);
   return { reply: `📝 Confira seu pedido:\n\n🏟️ Quadra: ${a.court.name}\n${ruleRow && hasOwnLocation(ruleRow) ? `📍 Local: ${courtPlaceText(ruleRow)}${ruleRow.locationMapsUrl ? `\n🗺️ ${ruleRow.locationMapsUrl}` : ''}\n` : ''}📅 Data: ${displayDate(a.day)}\n🕒 Horário: ${a.startTime} às ${end}\n⏱️ Duração: ${durationLabel(a.minutes)}\n💰 Valor total: ${slot.valor}\n${ctx.paymentRequired ? `💳 Pix agora: ${pix}` : '👤 O pagamento é feito na arena.'}\n\nConfirma a reserva?` };
 }
 

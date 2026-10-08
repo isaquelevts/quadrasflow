@@ -213,7 +213,7 @@ function UpcomingPanel({ bookings, courts, isToday, filter, onFilter, date }: { 
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const inCourt = bookings.filter((booking) => filter === 'all' || booking.court_id === filter);
-  const upcoming = isToday ? inCourt.filter((booking) => minutesOf(booking.end_at) > nowMinutes) : inCourt;
+  const upcoming = isToday ? inCourt.filter((booking) => minutesOf(booking.end_at, date) > nowMinutes) : inCourt;
   const finished = inCourt.length - upcoming.length;
   const total = upcoming.filter((booking) => booking.status !== 'monthly').reduce((sum, booking) => sum + booking.amount_cents, 0);
   const courtOptions = [{ value: 'all', label: 'Todas' }, ...courts.map((court) => ({ value: court.id, label: court.name }))];

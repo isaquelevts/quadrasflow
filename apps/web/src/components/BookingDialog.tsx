@@ -11,9 +11,9 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
-import { fetchDay, fmtDate, openWindow, todayKey, type Court, type DayData, type HoursDay } from '@/lib/arena';
+import { fetchDay, fmtDate, openWindow, operatingStart, todayKey, type Court, type DayData, type HoursDay } from '@/lib/arena';
 import { rulesOf, ruleProblem, ruleProblemText } from '@/lib/court-rules';
-import { errorMessage, formatPhone, formatTime, minutesOf, minutesOfTime, timeOfMinutes } from '@/lib/format';
+import { clockOf, errorMessage, formatPhone, formatTime, isoAt, minutesOf, minutesOfTime } from '@/lib/format';
 
 type EditableBooking = { id: string; customer_name: string; customer_phone?: string | null; start_at: string; end_at: string; court_id: string };
 type Mode = 'booking' | 'block' | 'edit';
@@ -42,11 +42,12 @@ export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initial
   useEffect(() => {
     if (!open) return;
     setMode(initialMode);
-    setDate(booking?.start_at.slice(0, 10) || initialDate);
+    const at = booking ? operatingStart(weeklyHours, booking.start_at) : null;
+    setDate(at?.date || initialDate);
     setCourtId(booking?.court_id || initialCourtId || courts[0]?.id || '');
-    const s = booking ? minutesOf(booking.start_at) : initialStart ? minutesOfTime(initialStart) : 19 * 60;
+    const s = at ? at.minutes : initialStart ? minutesOfTime(initialStart) : 19 * 60;
     setStart(s);
-    setEnd(booking ? minutesOf(booking.end_at) : s + 60);
+    setEnd(booking && at ? minutesOf(booking.end_at, at.date) : s + 60);
     setCustomerName(booking?.customer_name || initialName || ''); setPhone(booking?.customer_phone ? formatPhone(booking.customer_phone) : initialPhone ? formatPhone(initialPhone) : '');
     setReason(''); setError('');
   }, [open, initialDate, courts, booking, initialCourtId, initialStart, initialMode, initialName, initialPhone]);
@@ -70,7 +71,7 @@ export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initial
 
   const clash = useMemo(() => {
     if (!day || !courtId) return null;
-    const overlaps = (s: string, e: string) => start < minutesOf(e) && end > minutesOf(s);
+    const overlaps = (s: string, e: string) => start < minutesOf(e, date) && end > minutesOf(s, date);
     const blockHit = day.blocks.find((block) => block.court_id === courtId && overlaps(block.start_at, block.end_at));
     if (blockHit) return { hard: true, text: `Conflito com bloqueio "${blockHit.reason}" (${formatTime(blockHit.start_at)}–${formatTime(blockHit.end_at)}).` };
     const bookingHit = day.bookings.find((item) => item.court_id === courtId && item.status !== 'cancelled' && item.status !== 'monthly' && item.id !== booking?.id && overlaps(item.start_at, item.end_at));
@@ -91,7 +92,7 @@ export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initial
     if (!opening) { setError('A arena está fechada neste dia. Escolha outra data.'); return; }
     if (clash?.hard) { setError(clash.text); return; }
     setSaving(true);
-    const startAt = `${date}T${timeOfMinutes(start)}:00.000Z`, endAt = `${date}T${timeOfMinutes(end)}:00.000Z`;
+    const startAt = isoAt(date, start), endAt = isoAt(date, end);
     const customerPhone = phone.replace(/\D/g, '');
     try {
       if (isBlock) await api('/api/blocks', { method: 'POST', body: JSON.stringify({ courtId, reason: reason.trim(), startAt, endAt }) });
@@ -119,8 +120,8 @@ export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initial
       <div className="grid gap-1.5"><Label>Quadra</Label><Select value={courtId} onValueChange={setCourtId}><SelectTrigger className="h-10 w-full"><SelectValue placeholder="Selecione a quadra" /></SelectTrigger><SelectContent>{courts.map((court) => <SelectItem key={court.id} value={court.id}>{court.name} · {court.sport}</SelectItem>)}</SelectContent></Select></div>
       <div className="grid gap-1.5"><Label>Data</Label><DatePicker className="h-10 w-full" value={date} onChange={setDate} /></div>
       <div className="grid grid-cols-2 gap-3">
-        <div className="grid gap-1.5"><Label>Início</Label><Select value={String(start)} onValueChange={(value) => setStart(Number(value))} disabled={!opening}><SelectTrigger className="h-10 w-full tabular-nums"><SelectValue /></SelectTrigger><SelectContent>{startOptions.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
-        <div className="grid gap-1.5"><Label>Fim</Label><Select value={String(end)} onValueChange={(value) => setEnd(Number(value))} disabled={!opening}><SelectTrigger className="h-10 w-full tabular-nums"><SelectValue /></SelectTrigger><SelectContent>{endOptions.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
+        <div className="grid gap-1.5"><Label>Início</Label><Select value={String(start)} onValueChange={(value) => setStart(Number(value))} disabled={!opening}><SelectTrigger className="h-10 w-full tabular-nums"><SelectValue /></SelectTrigger><SelectContent>{startOptions.map((t) => <SelectItem key={t} value={String(t)}>{clockOf(t)}{t >= 1440 ? ' (madrugada)' : ''}</SelectItem>)}</SelectContent></Select></div>
+        <div className="grid gap-1.5"><Label>Fim</Label><Select value={String(end)} onValueChange={(value) => setEnd(Number(value))} disabled={!opening}><SelectTrigger className="h-10 w-full tabular-nums"><SelectValue /></SelectTrigger><SelectContent>{endOptions.map((t) => <SelectItem key={t} value={String(t)}>{clockOf(t)}{t >= 1440 ? ' (madrugada)' : ''}</SelectItem>)}</SelectContent></Select></div>
       </div>
       {!isBlock && <p className="flex gap-2 text-[12.5px] text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />O valor é calculado pela tabela de preços da arena. Duração mínima de 1 hora, em blocos de 30 minutos.</p>}
       {!opening && <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">A arena não funciona neste dia.</p>}

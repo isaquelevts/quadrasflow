@@ -2,7 +2,7 @@ import type { CourtRules } from '@/lib/court-rules';
 import { addDays, format, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { api } from '@/lib/api';
-import { minutesOf, minutesOfTime } from '@/lib/format';
+import { clockLabel, minutesOfTime } from '@/lib/format';
 
 export type Court = { id: string; name: string; sport: string; price_cents: number; photo_url?: string | null; active?: number | boolean; rules?: CourtRules; location?: CourtLocation };
 /** Local próprio da quadra; endereço vazio = fica no endereço da arena. */
@@ -27,14 +27,23 @@ export const isActiveCourt = (court: Court) => court.active === undefined || cou
 export const isOpenDay = (hours: HoursDay | undefined) => Boolean(hours && (hours.is_open === true || hours.is_open === 1));
 export const hoursFor = (hours: HoursDay[], key: string) => hours.find((item) => item.weekday === dateFromKey(key).getDay());
 
+/**
+ * Dia de funcionamento e minutos de um horário salvo: 00:30 de sábado numa arena que na sexta fecha às 02:00
+ * fica na sexta, às 24:30. Fora disso, o próprio dia.
+ */
+export function operatingStart(hours: HoursDay[], iso: string) {
+  const day = iso.slice(0, 10), prev = shiftKey(day, -1), w = openWindow(hours, prev), own = minutesOfTime(iso.slice(11, 16));
+  return w && w.close > 1440 && own + 1440 < w.close && own < (openWindow(hours, day)?.open ?? 1440) ? { date: prev, minutes: own + 1440 } : { date: day, minutes: own };
+}
 /** Janela de funcionamento do dia em minutos, ou null se fechado. */
 export function openWindow(hours: HoursDay[], key: string) {
   const day = hoursFor(hours, key);
   if (!isOpenDay(day)) return null;
-  return { open: minutesOfTime(day!.open_time), close: minutesOfTime(day!.close_time), openTime: day!.open_time, closeTime: day!.close_time };
+  // closeTime "26:00" = 02:00 da madrugada seguinte: `close` passa de 1440 e o texto mostra o relógio.
+  return { open: minutesOfTime(day!.open_time), close: minutesOfTime(day!.close_time), openTime: day!.open_time, closeTime: clockLabel(day!.close_time) };
 }
 
-export const bookingMinutes = (booking: { start_at: string; end_at: string }) => Math.max(0, minutesOf(booking.end_at) - minutesOf(booking.start_at));
+export const bookingMinutes = (booking: { start_at: string; end_at: string }) => Math.max(0, (Date.parse(booking.end_at) - Date.parse(booking.start_at)) / 60000);
 export const activeBookings = (list: DayBooking[]) => list.filter((booking) => booking.status !== 'cancelled');
 
 /** Ocupação = soma das durações ÷ (horas de funcionamento × quadras). */

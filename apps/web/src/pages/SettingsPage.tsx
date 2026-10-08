@@ -15,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
-import { durationLabel, errorMessage, formatCurrency } from '@/lib/format';
+import { clockLabel, durationLabel, errorMessage, formatCurrency } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { primeWhen, rulesOf, type CourtRules, type PrimeRule, type Step } from '@/lib/court-rules';
 
@@ -31,6 +31,10 @@ type BookingPolicy = { refund: RefundPolicy; allowReschedule: boolean; reschedul
 const DAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
 const ORDER = [1, 2, 3, 4, 5, 6, 0];
 const TIMES = Array.from({ length: 36 }, (_, i) => `${String(6 + Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`);
+// Fechamento pode ir até 06:00 da madrugada seguinte: guardado como "24:00"…"30:00".
+const CLOSE_TIMES = [...TIMES, ...Array.from({ length: 13 }, (_, i) => `${24 + Math.floor(i / 2)}:${i % 2 ? '30' : '00'}`)];
+/** "26:00" → "02:00 (madrugada)"; "24:00" → "00:00 (meia-noite)". */
+const timeText = (t: string) => t === '24:00' ? '00:00 (meia-noite)' : t > '24:00' ? `${clockLabel(t)} (madrugada)` : t;
 const BANDS: Array<['morning' | 'afternoon' | 'evening', string]> = [['morning', 'Manhã · 08h–12h'], ['afternoon', 'Tarde · 12h–18h'], ['evening', 'Noite · 18h–23h']];
 const SUGGESTED = ['Estacionamento', 'Vestiário', 'Chuveiro', 'Bar', 'Wi-Fi', 'Iluminação', 'Aluguel de bolas', 'Arquibancada'];
 const SECTIONS: Array<[Section, string, ComponentType<LucideProps>]> = [['perfil', 'Perfil público', Store], ['horarios', 'Horários', Clock], ['regras', 'Regras de horário', Timer], ['precos', 'Preços', Tags], ['cancelamento', 'Cancelamento', CalendarX2], ['pagamentos', 'Pagamentos', CreditCard]];
@@ -134,7 +138,7 @@ export function SettingsPage() {
             {h.is_open ? <div className="flex flex-1 items-center gap-2">
               <TimeSelect label={`Abertura de ${DAYS[h.weekday]}`} value={h.open_time} onChange={(v) => updateHour(h.weekday, { open_time: v })} />
               <span className="text-muted-foreground">às</span>
-              <TimeSelect label={`Fechamento de ${DAYS[h.weekday]}`} value={h.close_time} onChange={(v) => updateHour(h.weekday, { close_time: v })} options={TIMES.filter((t) => t > h.open_time)} />
+              <TimeSelect label={`Fechamento de ${DAYS[h.weekday]}`} value={h.close_time} onChange={(v) => updateHour(h.weekday, { close_time: v })} options={CLOSE_TIMES.filter((t) => t > h.open_time)} wide />
               {h.close_time <= h.open_time && <span className="text-[12px] text-rose-600">fechamento antes da abertura</span>}
             </div> : <span className="flex-1 text-[13px] text-muted-foreground">Fechado</span>}
             <Button type="button" variant="ghost" size="sm" className="text-muted-foreground" onClick={() => copyToAll(h)} aria-label={`Copiar horário de ${DAYS[h.weekday]} para todos os dias`}><CopyCheck /> <span className="hidden sm:inline">Copiar para todos</span></Button>
@@ -212,9 +216,9 @@ function CopyButton({ value }: { value: string }) {
   return <Button type="button" variant="outline" size="icon" className="size-10" aria-label="Copiar endereço" onClick={() => { void navigator.clipboard?.writeText(value).then(() => toast.success('Link copiado'), () => toast.error('Não foi possível copiar')); }}><Copy /></Button>;
 }
 const DURATIONS = Array.from({ length: 15 }, (_, i) => 60 + i * 30);
-function TimeSelect({ label, value, onChange, options = TIMES }: { label: string; value: string; onChange: (value: string) => void; options?: string[] }) {
+function TimeSelect({ label, value, onChange, options = TIMES, wide }: { label: string; value: string; onChange: (value: string) => void; options?: string[]; wide?: boolean }) {
   const list = options.includes(value) ? options : [value, ...options];
-  return <Select value={value} onValueChange={onChange}><SelectTrigger className="h-9 w-24 tabular-nums" aria-label={label}><SelectValue /></SelectTrigger><SelectContent>{list.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select>;
+  return <Select value={value} onValueChange={onChange}><SelectTrigger className={cn('h-9 tabular-nums', wide ? 'w-44' : 'w-24')} aria-label={label}><SelectValue /></SelectTrigger><SelectContent>{list.map((t) => <SelectItem key={t} value={t}>{timeText(t)}</SelectItem>)}</SelectContent></Select>;
 }
 function Amenities({ value, onChange }: { value: string[]; onChange: (value: string[]) => void }) {
   const [draft, setDraft] = useState('');
