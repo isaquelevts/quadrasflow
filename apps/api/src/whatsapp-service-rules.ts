@@ -10,7 +10,7 @@ export function bookingInstant(wallTime: string, timeZone: string): number {
   }
   return instant;
 }
-export const serviceDefaults = { groupId:'', groupEnabled:false, events:['pending','confirmed','cancelled','expired','paid','handoff'], reviewEnabled:false, reviewDelayMinutes:15, reviewMessage:'Oi, {nome}! Como foi o jogo na {arena_name}? Sua avaliação ajuda bastante a nossa arena: {review_link}', reviewEnabledAt:'', manualResumeOnly:true };
+export const serviceDefaults = { groupId:'', groupEnabled:false, events:['pending','confirmed','cancelled','expired','paid','handoff'], reviewEnabled:false, reviewDelayMinutes:15, reviewMessage:'Oi, {nome}! Como foi o jogo na {arena_name}? Sua avaliação ajuda bastante a nossa arena: {review_link}', reviewEnabledAt:'', manualResumeOnly:true, monthlyChargeMessage:'Olá, {nome}! Passando para lembrar da mensalidade de {mes} na {arena_name}: {valor}, com vencimento hoje ({vencimento}). Qualquer dúvida é só responder aqui. 🙂' };
 export type ServiceSettings = typeof serviceDefaults;
 export function safePublicLink(value: unknown, kind: 'maps'|'instagram'|'review'): string {
   const raw=String(value??'').trim(); if (!raw) return '';

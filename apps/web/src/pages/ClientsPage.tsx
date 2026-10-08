@@ -17,7 +17,10 @@ import { errorMessage, formatCurrency, formatPhone, plural, whatsappLink } from 
 import { cn } from '@/lib/utils';
 
 type Client = { id: string; name: string; phone: string | null; email?: string | null; notes?: string; created_at: string; bookings_count: number; last_booking_at: string | null };
-type Member = { clientId: string; status: string; weekday: number; start_time: string; court_name: string };
+type PlanSlot = { weekday: number; start_time: string; court_name: string };
+type Member = { clientId: string; status: string; slots: PlanSlot[] };
+/** "Seg 19:00 e Sex 20:00" */
+const slotsText = (slots: PlanSlot[]) => slots.map((s) => `${WEEKDAYS[s.weekday]} ${s.start_time}`).join(' e ');
 type Review = { id: string; customer_name: string; rating: number; comment: string; created_at: string };
 type Filter = 'all' | 'monthly' | 'with' | 'without';
 type Sort = 'last' | 'count' | 'name';
@@ -56,7 +59,8 @@ export function ClientsPage() {
   }
   useEffect(() => { void load(); }, []);
 
-  const planOf = (clientId: string) => members.find((m) => m.clientId === clientId && m.status === 'active');
+  // Todos os horários dos planos ativos do cliente (um cliente pode jogar em vários dias).
+  const planOf = (clientId: string) => { const slots = members.filter((m) => m.clientId === clientId && m.status === 'active').flatMap((m) => m.slots); return slots.length ? slots : undefined; };
   const list = useMemo(() => {
     const q = query.trim().toLowerCase(), digits = q.replace(/\D/g, '');
     const out = clients.filter((c) => (!q || c.name.toLowerCase().includes(q) || (digits.length > 0 && phoneKey(c.phone).includes(digits)))
@@ -102,7 +106,7 @@ export function ClientsPage() {
               <td className="px-5 py-3"><button type="button" onClick={() => setViewing(c)} className="flex items-center gap-3 text-left"><Avatar name={c.name} className="size-9" />
                 <span><span className="flex flex-wrap items-center gap-2"><span className="font-medium underline-offset-2 hover:underline">{c.name}</span>{tags(c)}</span>{c.phone && <span className="block text-[12px] text-muted-foreground tabular-nums">{formatPhone(c.phone)}</span>}</span></button></td>
               <td className="px-3 py-3 font-semibold tabular-nums">{c.bookings_count}</td>
-              <td className="px-3 py-3 tabular-nums">{c.last_booking_at ? dateBR(c.last_booking_at) : <span className="text-muted-foreground">{plan ? `Mensalista · ${WEEKDAYS[plan.weekday]} ${plan.start_time}` : '—'}</span>}</td>
+              <td className="px-3 py-3 tabular-nums">{c.last_booking_at ? dateBR(c.last_booking_at) : <span className="text-muted-foreground">{plan ? `Mensalista · ${slotsText(plan)}` : '—'}</span>}</td>
               <td className="px-3 py-3 text-muted-foreground tabular-nums">{dateBR(c.created_at)}</td>
               <td className="px-5 py-3"><div className="flex justify-end gap-1.5">
                 {wa && <Button asChild variant="outline" size="icon" aria-label={`WhatsApp de ${c.name}`} title="WhatsApp"><a href={wa} target="_blank" rel="noreferrer"><MessageCircle /></a></Button>}
@@ -165,7 +169,7 @@ function Stars({ value, className }: { value: number; className?: string }) {
 
 type HistoryItem = { id: string; start_at: string; end_at: string; status: string; amount_cents: number; court_name: string; cancel_reason: string };
 
-function ClientSheet({ client, plan, onClose, onChanged, tags }: { client: Client | null; plan?: Member; onClose: () => void; onChanged: (client: Client) => void; tags: ReactNode }) {
+function ClientSheet({ client, plan, onClose, onChanged, tags }: { client: Client | null; plan?: PlanSlot[]; onClose: () => void; onChanged: (client: Client) => void; tags: ReactNode }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -214,7 +218,7 @@ function ClientSheet({ client, plan, onClose, onChanged, tags }: { client: Clien
         <div className="py-3"><div className="text-lg font-semibold tabular-nums">{client.created_at.slice(8, 10)}/{client.created_at.slice(5, 7)}/{client.created_at.slice(2, 4)}</div><div className="text-[11.5px] text-muted-foreground">cliente desde</div></div>
       </div>
       {plan && <div className="flex items-center gap-2 rounded-lg border border-lime-300/60 bg-lime-300/15 px-3 py-2.5 text-[13px]"><Repeat className="size-4 text-lime-700" aria-hidden="true" />
-        <span><b>Mensalista</b> · {WEEKDAYS[plan.weekday]} às {plan.start_time} · {plan.court_name}</span><Link to="/mensalistas" className="ml-auto font-medium whitespace-nowrap text-brand-700">Ver plano</Link></div>}
+        <span><b>Mensalista</b> · {plan.map((s) => `${WEEKDAYS[s.weekday]} às ${s.start_time} · ${s.court_name}`).join('; ')}</span><Link to="/mensalistas" className="ml-auto font-medium whitespace-nowrap text-brand-700">Ver plano</Link></div>}
       <div className="grid gap-1.5">
         <Label htmlFor="client-notes" className="text-[12px] font-semibold tracking-wide text-muted-foreground uppercase">Observações</Label>
         <Textarea id="client-notes" rows={3} maxLength={1000} placeholder="Ex.: prefere a quadra 2, traz o próprio time" value={notes} onChange={(e) => setNotes(e.target.value)} />

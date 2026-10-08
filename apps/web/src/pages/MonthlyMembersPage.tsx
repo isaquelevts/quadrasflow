@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { CalendarDays, ChevronLeft, ChevronRight, CircleCheck, CircleX, Clock, Hourglass, Info, LandPlot, LoaderCircle, Pause, Pencil, Play, Plus, Receipt, Repeat, TrendingUp } from 'lucide-react';
+import { useEffect, useState, type FormEvent } from 'react';
+import { CalendarDays, ChevronLeft, ChevronRight, CircleCheck, CircleX, Clock, Hourglass, Info, LandPlot, LoaderCircle, MessageCircle, Pause, Pencil, Play, Plus, Receipt, Repeat, Trash2, TrendingUp } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthProvider';
 import { addMonths, format, parseISO } from 'date-fns';
@@ -16,18 +16,19 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import { api } from '@/lib/api';
 import { isActiveCourt, todayKey, type Court } from '@/lib/arena';
-import { durationLabel, errorMessage, formatCurrency, formatPhone, minutesOfTime, plural, timeOfMinutes } from '@/lib/format';
+import { errorMessage, formatCurrency, formatPhone, minutesOfTime, plural, timeOfMinutes } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 type Client = { id: string; name: string; phone: string | null };
-type Member = { id: string; courtId: string; client_name: string; phone: string | null; court_name: string; weekday: number; start_time: string; duration_minutes: number; amount_cents: number; status: 'active' | 'paused' | 'ended'; created_at: string };
+type Slot = { id?: string; court_id: string; court_name?: string; weekday: number; start_time: string; duration_minutes: number };
+type Member = { id: string; clientId: string; client_name: string; phone: string | null; amount_cents: number; due_day: number; auto_charge: boolean; status: 'active' | 'paused' | 'ended'; created_at: string; slots: Slot[] };
 type Charge = { id: string; memberId: string; client_name: string; court_name: string; cycle: string; amount_cents: number; due_date: string; paid_at: string | null };
 
 const DAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
 const everyDay = (weekday: number) => weekday === 0 || weekday === 6 ? `Todo ${DAYS[weekday].toLowerCase()}` : `Toda ${DAYS[weekday].toLowerCase()}-feira`;
-const plDay = (weekday: number, n: number) => `${n} ${n === 1 ? DAYS[weekday].toLowerCase() : `${DAYS[weekday].toLowerCase()}s`}`;
 const MEMBER: Record<Member['status'], { label: string; tone: Tone }> = { active: { label: 'Ativo', tone: 'green' }, paused: { label: 'Pausado', tone: 'gray' }, ended: { label: 'Encerrado', tone: 'rose' } };
 const cycleOf = (date: Date) => format(date, 'yyyy-MM');
 const monthDate = (cycle: string) => parseISO(`${cycle}-01T12:00:00`);
@@ -44,6 +45,8 @@ function datesIn(cycle: string, weekday: number) {
   }
   return out;
 }
+/** Todas as datas do mês em que o plano joga (um plano pode ter vários dias da semana). */
+const gamesIn = (cycle: string, slots: Array<Pick<Slot, 'weekday'>>) => slots.flatMap((s) => datesIn(cycle, s.weekday)).sort();
 const chargeStatus = (charge: Charge): { label: string; tone: Tone } => charge.paid_at ? { label: 'Pago', tone: 'green' } : charge.due_date < todayKey() ? { label: 'Atrasada', tone: 'rose' } : { label: 'Pendente', tone: 'amber' };
 
 type Confirm = { title: string; text: string; action: string; danger?: boolean; run: () => Promise<void> } | null;
@@ -125,13 +128,13 @@ export function MonthlyMembersPage() {
         {visible.length ? <ul className="divide-y">{visible.map((m) => <PlanRow key={m.id} member={m} cycle={cycle} busy={busy} isAdmin={isAdmin} onEdit={() => setEditingMember(m)}
           onPause={() => void setStatus(m, m.status === 'active' ? 'paused' : 'active', m.status === 'active' ? 'Plano pausado — horários liberados na agenda' : 'Plano retomado')}
           onEnd={() => setConfirm({ title: `Encerrar o plano de ${m.client_name}?`, text: 'Os horários futuros são liberados na agenda. As cobranças já pagas continuam no histórico.', action: 'Encerrar plano', danger: true, run: () => setStatus(m, 'ended', 'Plano encerrado') })} />)}</ul>
-          : <EmptyState icon={Repeat} title="Nenhum mensalista ainda" text="Cadastre um horário fixo semanal. A cobrança do mês é gerada automaticamente." action={isAdmin ? <Button onClick={() => setFormOpen(true)}><Plus /> Novo mensalista</Button> : undefined} />}
+          : <EmptyState icon={Repeat} title="Nenhum mensalista ainda" text="Cadastre os horários fixos da semana (um ou vários dias). A cobrança do mês é gerada automaticamente." action={isAdmin ? <Button onClick={() => setFormOpen(true)}><Plus /> Novo mensalista</Button> : undefined} />}
       </Panel>
 
       <Panel>
         <div className="border-b px-4 py-4 lg:px-5">
           <h2 className="text-[15px] font-semibold">Cobranças de {monthLabel(cycle, 'MMMM')}</h2>
-          <p className="text-[12.5px] text-muted-foreground">Uma cobrança por mensalista ativo, com vencimento no dia 5.</p>
+          <p className="text-[12.5px] text-muted-foreground">Uma cobrança por plano ativo, no dia de vencimento de cada plano.</p>
         </div>
         {charges.length ? <ul className="divide-y">{charges.map((c) => {
           const st = chargeStatus(c);
@@ -169,8 +172,7 @@ export function MonthlyMembersPage() {
 }
 
 function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd }: { member: Member; cycle: string; busy: boolean; isAdmin: boolean; onEdit: () => void; onPause: () => void; onEnd: () => void }) {
-  const dates = datesIn(cycle, m.weekday), today = todayKey();
-  const start = minutesOfTime(m.start_time), idle = m.status !== 'active';
+  const dates = gamesIn(cycle, m.slots), today = todayKey(), idle = m.status !== 'active';
   return <li className={cn('flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:px-5', idle && 'bg-muted/40')}>
     <div className="flex min-w-0 items-center gap-3 lg:w-64">
       <Avatar name={m.client_name} className="size-10" />
@@ -180,11 +182,11 @@ function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd }: { 
       </div>
     </div>
     <div className={cn('min-w-0 flex-1', idle && 'opacity-60')}>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
-        <span className="inline-flex items-center gap-1.5 font-medium"><Repeat className="size-4 text-brand-600" aria-hidden="true" />{everyDay(m.weekday)}</span>
-        <span className="inline-flex items-center gap-1.5 text-muted-foreground tabular-nums"><Clock className="size-4" aria-hidden="true" />{m.start_time}–{timeOfMinutes(start + m.duration_minutes)}</span>
-        <span className="inline-flex items-center gap-1.5 text-muted-foreground"><LandPlot className="size-4" aria-hidden="true" />{m.court_name}</span>
-      </div>
+      <ul className="space-y-1" aria-label={`Horários de ${m.client_name}`}>{m.slots.map((s) => <li key={s.id ?? `${s.weekday}-${s.start_time}-${s.court_id}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
+        <span className="inline-flex items-center gap-1.5 font-medium"><Repeat className="size-4 text-brand-600" aria-hidden="true" />{everyDay(s.weekday)}</span>
+        <span className="inline-flex items-center gap-1.5 text-muted-foreground tabular-nums"><Clock className="size-4" aria-hidden="true" />{s.start_time}–{timeOfMinutes(minutesOfTime(s.start_time) + s.duration_minutes)}</span>
+        <span className="inline-flex items-center gap-1.5 text-muted-foreground"><LandPlot className="size-4" aria-hidden="true" />{s.court_name}</span>
+      </li>)}</ul>
       {m.status !== 'ended' && <div className="mt-2 flex flex-wrap gap-1.5">
         {dates.map((d) => {
           const past = d < today, isToday = d === today;
@@ -194,7 +196,8 @@ function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd }: { 
       </div>}
     </div>
     <div className="flex items-center gap-2 lg:justify-end">
-      <div className="mr-2 flex-1 lg:flex-none lg:text-right"><div className="font-semibold tabular-nums">{formatCurrency(m.amount_cents)}<span className="text-[12px] font-normal text-muted-foreground">/mês</span></div><div className="text-[11.5px] text-muted-foreground">{durationLabel(m.duration_minutes)} por jogo</div></div>
+      <div className="mr-2 flex-1 lg:flex-none lg:text-right"><div className="font-semibold tabular-nums">{formatCurrency(m.amount_cents)}<span className="text-[12px] font-normal text-muted-foreground">/mês</span></div>
+        <div className="text-[11.5px] text-muted-foreground">vence dia {m.due_day}{m.auto_charge && <> · <span className="inline-flex items-center gap-0.5 text-brand-700"><MessageCircle className="size-3" aria-hidden="true" />cobra no WhatsApp</span></>}</div></div>
       {m.status !== 'ended' && isAdmin && <>
         <Button variant="outline" size="icon" disabled={busy} aria-label={`Editar plano de ${m.client_name}`} title="Editar" onClick={onEdit}><Pencil /></Button>
         <Button variant="outline" disabled={busy} onClick={onPause}>{m.status === 'active' ? <><Pause />Pausar</> : <><Play />Retomar</>}</Button>
@@ -205,17 +208,20 @@ function PlanRow({ member: m, cycle, busy, isAdmin, onEdit, onPause, onEnd }: { 
 }
 
 const TIMES = Array.from({ length: 36 }, (_, i) => 360 + i * 30); // 06:00 → 23:30
+const DUE_DAYS = Array.from({ length: 31 }, (_, i) => i + 1);
+type SlotDraft = { key: number; courtId: string; weekday: number; start: number; end: number };
+let slotKey = 0;
+const newSlot = (courtId: string, weekday = 1, start = 19 * 60, end = 20 * 60): SlotDraft => ({ key: ++slotKey, courtId, weekday, start, end });
 
 function MemberSheet({ open, member, onOpenChange, cycle, courts, clients, onClientCreated, onSaved }: { open: boolean; member: Member | null; onOpenChange: (open: boolean) => void; cycle: string; courts: Court[]; clients: Client[]; onClientCreated: (client: Client) => void; onSaved: () => void }) {
   const [mode, setMode] = useState<'existing' | 'new'>('existing');
   const [clientId, setClientId] = useState('');
   const [clientName, setClientName] = useState('');
   const [clientPhone, setClientPhone] = useState('');
-  const [courtId, setCourtId] = useState('');
-  const [weekday, setWeekday] = useState(1);
-  const [start, setStart] = useState(19 * 60);
-  const [end, setEnd] = useState(20 * 60);
+  const [slots, setSlots] = useState<SlotDraft[]>([]);
   const [amount, setAmount] = useState('');
+  const [dueDay, setDueDay] = useState(5);
+  const [autoCharge, setAutoCharge] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -223,23 +229,29 @@ function MemberSheet({ open, member, onOpenChange, cycle, courts, clients, onCli
     if (!open) return;
     setMode(clients.length ? 'existing' : 'new'); setClientId(''); setClientName(''); setClientPhone('');
     if (member) {
-      const s = minutesOfTime(member.start_time);
-      setCourtId(member.courtId); setWeekday(member.weekday); setStart(s); setEnd(s + member.duration_minutes); setAmount((member.amount_cents / 100).toFixed(2).replace('.', ','));
-    } else { setCourtId(courts[0]?.id || ''); setWeekday(1); setStart(19 * 60); setEnd(20 * 60); setAmount(''); }
+      setSlots(member.slots.map((s) => { const start = minutesOfTime(s.start_time); return newSlot(s.court_id, s.weekday, start, start + s.duration_minutes); }));
+      setAmount((member.amount_cents / 100).toFixed(2).replace('.', ',')); setDueDay(member.due_day); setAutoCharge(member.auto_charge);
+    } else { setSlots([newSlot(courts[0]?.id || '')]); setAmount(''); setDueDay(new Date().getDate()); setAutoCharge(false); }
     setError('');
   }, [open, member]);
-  useEffect(() => { if (end <= start || end - start > 240) setEnd(start + 60); }, [start, end]);
 
-  const endOptions = useMemo(() => Array.from({ length: 7 }, (_, i) => start + 60 + i * 30).filter((t) => t <= 24 * 60), [start]);
-  const games = datesIn(cycle, weekday).length;
+  const patchSlot = (key: number, patch: Partial<SlotDraft>) => setSlots((list) => list.map((s) => {
+    if (s.key !== key) return s;
+    const next = { ...s, ...patch };
+    if (next.end <= next.start || next.end - next.start > 480) next.end = next.start + 60;
+    return next;
+  }));
+  const games = gamesIn(cycle, slots).length;
   const cents = Math.round(Number(amount.replace(/\./g, '').replace(',', '.')) * 100) || 0;
+  const phone = member ? member.phone : mode === 'existing' ? clients.find((c) => c.id === clientId)?.phone ?? null : clientPhone.replace(/\D/g, '') || null;
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setError('');
     setSaving(true);
+    const plan = { slots: slots.map((s) => ({ courtId: s.courtId, weekday: s.weekday, startTime: timeOfMinutes(s.start), durationMinutes: s.end - s.start })), amountCents: cents, dueDay, autoCharge: autoCharge && Boolean(phone) };
     try {
       if (member) {
-        await api(`/api/monthly-members/${member.id}`, { method: 'PATCH', body: JSON.stringify({ courtId, weekday, startTime: timeOfMinutes(start), durationMinutes: end - start, amountCents: cents }) });
+        await api(`/api/monthly-members/${member.id}`, { method: 'PATCH', body: JSON.stringify(plan) });
         toast.success('Plano atualizado');
         onSaved(); return;
       }
@@ -248,15 +260,15 @@ function MemberSheet({ open, member, onOpenChange, cycle, courts, clients, onCli
         const created = await api<{ client: Client }>('/api/clients', { method: 'POST', body: JSON.stringify({ name: clientName.trim(), phone: clientPhone }) });
         onClientCreated(created.client); id = created.client.id; setMode('existing'); setClientId(id);
       }
-      await api('/api/monthly-members', { method: 'POST', body: JSON.stringify({ clientId: id, courtId, weekday, startTime: timeOfMinutes(start), durationMinutes: end - start, amountCents: cents }) });
+      await api('/api/monthly-members', { method: 'POST', body: JSON.stringify({ clientId: id, ...plan }) });
       toast.success('Mensalista cadastrado');
       onSaved();
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setSaving(false); }
   }
 
-  const ready = (member ? true : mode === 'existing' ? Boolean(clientId) : clientName.trim().length >= 2) && Boolean(courtId) && cents > 0;
-  return <ResponsiveSheet open={open} onOpenChange={onOpenChange} title={member ? 'Editar plano' : 'Novo mensalista'} description={member ? member.client_name : 'Horário fixo toda semana, com cobrança mensal.'}
+  const ready = (member ? true : mode === 'existing' ? Boolean(clientId) : clientName.trim().length >= 2) && slots.length > 0 && slots.every((s) => s.courtId) && cents > 0;
+  return <ResponsiveSheet open={open} onOpenChange={onOpenChange} title={member ? 'Editar plano' : 'Novo mensalista'} description={member ? member.client_name : 'Horários fixos toda semana, com uma cobrança mensal.'}
     footer={<div className="grid grid-cols-2 gap-2">
       <Button type="button" variant="outline" className="h-10" onClick={() => onOpenChange(false)}>Cancelar</Button>
       <Button type="submit" form="member-form" className="h-10" disabled={saving || !ready}>{saving && <LoaderCircle className="animate-spin" />}{member ? 'Salvar alterações' : 'Cadastrar mensalista'}</Button>
@@ -272,22 +284,37 @@ function MemberSheet({ open, member, onOpenChange, cycle, courts, clients, onCli
             <div className="grid gap-1.5"><Label htmlFor="member-phone">WhatsApp <span className="font-normal text-muted-foreground">(opcional)</span></Label><Input id="member-phone" className="h-10" type="tel" inputMode="tel" value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} onBlur={() => setClientPhone(formatPhone(clientPhone))} placeholder="(00) 00000-0000" /></div>
           </div>}
       </div>}
-      <div className="grid gap-1.5"><Label>Quadra</Label><Select value={courtId} onValueChange={setCourtId}><SelectTrigger className="h-10 w-full" aria-label="Quadra"><SelectValue placeholder="Selecione a quadra" /></SelectTrigger><SelectContent>{courts.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} · {c.sport}</SelectItem>)}</SelectContent></Select></div>
-      <fieldset className="grid gap-1.5"><legend className="mb-1.5 text-sm font-medium">Dia da semana</legend>
-        <div className="grid grid-cols-7 gap-1" role="radiogroup" aria-label="Dia da semana">
-          {[1, 2, 3, 4, 5, 6, 0].map((d) => <button key={d} type="button" role="radio" aria-checked={weekday === d} aria-label={DAYS[d]} onClick={() => setWeekday(d)}
-            className={cn('grid h-10 place-items-center rounded-md border text-[12.5px] font-medium transition', weekday === d ? 'border-brand-900 bg-brand-900 text-white' : 'hover:bg-muted')}>{DAYS[d].slice(0, 3)}</button>)}
-        </div>
+      <fieldset className="grid gap-2"><legend className="mb-1 text-sm font-medium">Horários fixos</legend>
+        {slots.map((slot, index) => <div key={slot.key} className="grid gap-2.5 rounded-lg border p-3" role="group" aria-label={`Horário ${index + 1}`}>
+          <div className="flex items-center gap-2">
+            <Select value={slot.courtId} onValueChange={(v) => patchSlot(slot.key, { courtId: v })}><SelectTrigger className="h-10 min-w-0 flex-1" aria-label={`Quadra do horário ${index + 1}`}><SelectValue placeholder="Selecione a quadra" /></SelectTrigger><SelectContent>{courts.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} · {c.sport}</SelectItem>)}</SelectContent></Select>
+            {slots.length > 1 && <Button type="button" variant="ghost" size="icon" className="shrink-0 text-muted-foreground hover:text-rose-600" aria-label={`Remover horário ${index + 1}`} onClick={() => setSlots((list) => list.filter((s) => s.key !== slot.key))}><Trash2 /></Button>}
+          </div>
+          <div className="grid grid-cols-7 gap-1" role="radiogroup" aria-label={`Dia da semana do horário ${index + 1}`}>
+            {[1, 2, 3, 4, 5, 6, 0].map((d) => <button key={d} type="button" role="radio" aria-checked={slot.weekday === d} aria-label={DAYS[d]} onClick={() => patchSlot(slot.key, { weekday: d })}
+              className={cn('grid h-9 place-items-center rounded-md border text-[12.5px] font-medium transition', slot.weekday === d ? 'border-brand-900 bg-brand-900 text-white' : 'hover:bg-muted')}>{DAYS[d].slice(0, 3)}</button>)}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Select value={String(slot.start)} onValueChange={(v) => patchSlot(slot.key, { start: Number(v) })}><SelectTrigger className="h-10 w-full tabular-nums" aria-label={`Início do horário ${index + 1}`}><SelectValue /></SelectTrigger><SelectContent>{TIMES.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select>
+            <Select value={String(slot.end)} onValueChange={(v) => patchSlot(slot.key, { end: Number(v) })}><SelectTrigger className="h-10 w-full tabular-nums" aria-label={`Fim do horário ${index + 1}`}><SelectValue /></SelectTrigger><SelectContent>{Array.from({ length: 15 }, (_, i) => slot.start + 60 + i * 30).filter((t) => t <= 24 * 60).map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select>
+          </div>
+        </div>)}
+        {slots.length < 14 && <Button type="button" variant="outline" className="h-10" onClick={() => setSlots((list) => [...list, newSlot(list.at(-1)?.courtId || courts[0]?.id || '', ((list.at(-1)?.weekday ?? 0) + 1) % 7, list.at(-1)?.start, list.at(-1)?.end)])}><Plus /> Adicionar outro dia</Button>}
       </fieldset>
       <div className="grid grid-cols-2 gap-3">
-        <div className="grid gap-1.5"><Label>Início</Label><Select value={String(start)} onValueChange={(v) => setStart(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Início"><SelectValue /></SelectTrigger><SelectContent>{TIMES.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
-        <div className="grid gap-1.5"><Label>Fim</Label><Select value={String(end)} onValueChange={(v) => setEnd(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Fim"><SelectValue /></SelectTrigger><SelectContent>{endOptions.map((t) => <SelectItem key={t} value={String(t)}>{timeOfMinutes(t)}</SelectItem>)}</SelectContent></Select></div>
+        <div className="grid gap-1.5"><Label htmlFor="member-amount">Valor mensal</Label>
+          <div className="relative"><span className="absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground">R$</span><Input id="member-amount" className="h-10 pl-9 tabular-nums" inputMode="decimal" placeholder="0,00" value={amount} onChange={(e) => setAmount(e.target.value)} /></div></div>
+        <div className="grid gap-1.5"><Label>Vence todo dia</Label>
+          <Select value={String(dueDay)} onValueChange={(v) => setDueDay(Number(v))}><SelectTrigger className="h-10 w-full tabular-nums" aria-label="Dia de vencimento"><SelectValue /></SelectTrigger><SelectContent>{DUE_DAYS.map((d) => <SelectItem key={d} value={String(d)}>{d}</SelectItem>)}</SelectContent></Select></div>
       </div>
-      <div className="grid gap-1.5"><Label htmlFor="member-amount">Valor mensal</Label>
-        <div className="relative"><span className="absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground">R$</span><Input id="member-amount" className="h-10 pl-9 tabular-nums" inputMode="decimal" placeholder="0,00" value={amount} onChange={(e) => setAmount(e.target.value)} /></div></div>
+      <label className={cn('flex items-start justify-between gap-3 rounded-lg border p-3', phone ? 'cursor-pointer' : 'opacity-60')}>
+        <span><span className="block text-sm font-medium">Cobrar automaticamente no WhatsApp</span>
+          <span className="block text-[12px] text-muted-foreground">{phone ? `No dia ${dueDay}, às 9h, o cliente recebe a mensagem com o valor. O texto fica em WhatsApp → Serviços.` : 'Cadastre o WhatsApp do cliente para ligar a cobrança automática.'}</span></span>
+        <Switch checked={autoCharge && Boolean(phone)} disabled={!phone} onCheckedChange={setAutoCharge} aria-label="Cobrar automaticamente no WhatsApp" />
+      </label>
       <div className="flex gap-2 rounded-lg border border-brand-100 bg-brand-50 px-3 py-2.5 text-[12.5px] text-brand-800">
         <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        <span>Em <b>{monthLabel(cycle, 'MMMM')}</b> são <b>{plDay(weekday, games)}</b>{cents > 0 && games > 0 ? <> — {formatCurrency(Math.round(cents / games))} por jogo</> : null}. O horário fica reservado na agenda e a cobrança vence todo dia 5.</span>
+        <span>Em <b>{monthLabel(cycle, 'MMMM')}</b> são <b>{plural(games, 'jogo', 'jogos')}</b>{cents > 0 && games > 0 ? <> — {formatCurrency(Math.round(cents / games))} por jogo</> : null}. Os horários ficam reservados na agenda e a cobrança vence todo dia {dueDay}{dueDay > 28 ? ' (ou no último dia do mês)' : ''}.</span>
       </div>
       {error && <p role="alert" className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">{error}</p>}
     </form>

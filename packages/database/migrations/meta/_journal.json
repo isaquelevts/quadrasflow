@@ -64,6 +64,13 @@
       "when": 1791498462926,
       "tag": "0008_court_location",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1791500630386,
+      "tag": "0009_monthly_slots",
+      "breakpoints": true
     }
   ]
 }

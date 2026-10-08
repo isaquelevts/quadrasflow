@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, gte, lt, ne, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { appAudit, blockedSlots, bookingEvents, bookings, clients, companies, companyHours, companyPriceSlots, courts, integrationSettings, messageTemplates, monthlyMembers, reviewLinks } from '@quadrasflow/database';
+import { appAudit, blockedSlots, bookingEvents, bookings, clients, companies, companyHours, companyPriceSlots, courts, integrationSettings, messageTemplates, monthlyMemberSlots, reviewLinks } from '@quadrasflow/database';
 import { db } from './database.js';
 import { isUniqueViolation } from './db-errors.js';
 import type { AuthUser } from './auth.js';
@@ -9,7 +9,7 @@ import { bookingAmountCents } from './pricing.js';
 import { parseCourtRules, validateCourtRules } from './court-rules.js';
 import { locationJson, NO_LOCATION, validateCourtLocation } from './court-location.js';
 import { maxDurationOf, validMaxDuration } from './booking-duration.js';
-import { findMonthlyConflict, monthlyConflictMessage } from './monthly-conflict.js';
+import { findMonthlyConflict, monthlyBusyOn, monthlyConflictMessage } from './monthly-conflict.js';
 import { changeBookingStatus, syncBookingReceivable, type BookingStatus } from './booking-finance.js';
 import { arenaToday, getBookingPolicy, paidForBooking, recordRefundDecision, REFUND_POLICIES, saveBookingPolicy, validRescheduleHours, type RefundPolicy } from './booking-policy.js';
 import { cancelOpenPix } from './mercadopago.js';
@@ -224,7 +224,7 @@ export async function registerArenaRoutes(app: FastifyInstance) {
     const [court, booking, member] = await Promise.all([
       db.select({ id: courts.id }).from(courts).where(and(eq(courts.id, id), eq(courts.companyId, companyId))).limit(1),
       db.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, id))).limit(1),
-      db.select({ id: monthlyMembers.id }).from(monthlyMembers).where(and(eq(monthlyMembers.companyId, companyId), eq(monthlyMembers.courtId, id))).limit(1),
+      db.select({ id: monthlyMemberSlots.id }).from(monthlyMemberSlots).where(and(eq(monthlyMemberSlots.companyId, companyId), eq(monthlyMemberSlots.courtId, id))).limit(1),
     ]);
     if (!court.length) throw fail(404, 'Quadra não encontrada.');
     if (booking.length || member.length) throw fail(409, 'Esta quadra tem reservas ou mensalistas registrados. Pause a quadra em vez de excluir, para manter o histórico.');
@@ -243,9 +243,10 @@ export async function registerArenaRoutes(app: FastifyInstance) {
   });
   app.get('/api/bookings', auth, async (request) => {
     const companyId = companyOf(request), query = request.query as { date?: string }, day = validDay(query.date || spDay());
-    const [rows, blockRows, members] = await Promise.all([db.select({ booking: bookings, courtName: courts.name, sport: courts.sport }).from(bookings).innerJoin(courts, eq(bookings.courtId, courts.id)).where(and(eq(bookings.companyId, companyId), gte(bookings.startAt, `${day}T00:00:00.000Z`), lt(bookings.startAt, `${day}T24:00:00.000Z`))).orderBy(asc(bookings.startAt)), db.select({ block: blockedSlots, courtName: courts.name, sport: courts.sport }).from(blockedSlots).innerJoin(courts, eq(blockedSlots.courtId, courts.id)).where(and(eq(blockedSlots.companyId, companyId), gte(blockedSlots.startAt, `${day}T00:00:00.000Z`), lt(blockedSlots.startAt, `${day}T24:00:00.000Z`))).orderBy(asc(blockedSlots.startAt)), db.select({ member: monthlyMembers, clientName: clients.name, customerPhone: clients.phone, courtName: courts.name, sport: courts.sport }).from(monthlyMembers).innerJoin(clients, eq(monthlyMembers.clientId, clients.id)).innerJoin(courts, eq(monthlyMembers.courtId, courts.id)).where(and(eq(monthlyMembers.companyId, companyId), eq(monthlyMembers.weekday, new Date(`${day}T12:00:00Z`).getUTCDay()), eq(monthlyMembers.status, 'active')))]);
+    const [rows, blockRows, members] = await Promise.all([db.select({ booking: bookings, courtName: courts.name, sport: courts.sport }).from(bookings).innerJoin(courts, eq(bookings.courtId, courts.id)).where(and(eq(bookings.companyId, companyId), gte(bookings.startAt, `${day}T00:00:00.000Z`), lt(bookings.startAt, `${day}T24:00:00.000Z`))).orderBy(asc(bookings.startAt)), db.select({ block: blockedSlots, courtName: courts.name, sport: courts.sport }).from(blockedSlots).innerJoin(courts, eq(blockedSlots.courtId, courts.id)).where(and(eq(blockedSlots.companyId, companyId), gte(blockedSlots.startAt, `${day}T00:00:00.000Z`), lt(blockedSlots.startAt, `${day}T24:00:00.000Z`))).orderBy(asc(blockedSlots.startAt)), monthlyBusyOn(db, companyId, day)]);
     const regular = rows.map(({ booking: b, courtName, sport }) => ({ id: b.id, customer_name: b.customerName, customer_phone: b.customerPhone, start_at: b.startAt, end_at: b.endAt, amount_cents: b.amountCents, status: b.status, source: b.source, court_id: b.courtId, court_name: courtName, sport }));
-    const recurring = members.map(({ member: m, clientName, customerPhone, courtName, sport }) => { const [h = 0, min = 0] = m.startTime.split(':').map(Number), end = h * 60 + min + m.durationMinutes; return { id: `monthly-${m.id}-${day}`, customer_name: clientName, customer_phone: customerPhone, start_at: `${day}T${m.startTime}:00.000Z`, end_at: `${day}T${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}:00.000Z`, amount_cents: m.amountCents, status: 'monthly', source: 'monthly', court_id: m.courtId, court_name: courtName, sport }; });
+    const hhmm = (total: number) => `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+    const recurring = members.map((m) => ({ id: `monthly-${m.slotId}-${day}`, member_id: m.memberId, customer_name: m.clientName, customer_phone: m.clientPhone, start_at: `${day}T${hhmm(m.start)}:00.000Z`, end_at: `${day}T${hhmm(m.end)}:00.000Z`, amount_cents: m.amountCents, status: 'monthly', source: 'monthly', court_id: m.courtId, court_name: m.courtName, sport: m.sport }));
     return { bookings: [...regular, ...recurring].sort((a, b) => a.start_at.localeCompare(b.start_at)), blocks: blockRows.map(({ block: b, courtName, sport }) => ({ id: b.id, reason: b.reason, start_at: b.startAt, end_at: b.endAt, court_id: b.courtId, court_name: courtName, sport })) };
   });
 

@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gte, lte, ne, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { appAudit, blockedSlots, bookings, clients, companyHours, courts, financeEntries, monthlyCharges, monthlyMembers } from '@quadrasflow/database';
+import { appAudit, blockedSlots, bookings, clients, companyHours, courts, financeEntries, monthlyCharges, monthlyMemberSlots, monthlyMembers } from '@quadrasflow/database';
+import { arenaToday } from './booking-policy.js';
+import { dueDateOf, parsePlanSlots, validDueDay, type PlanSlot } from './monthly-plan.js';
 import { bookingEnded, changeBookingStatus, syncBookingReceivable } from './booking-finance.js';
 import { db } from './database.js';
 import { adminOf, audit, companyOf, fail, text, userOf } from './arena.js';
@@ -10,6 +12,7 @@ const bodyOf = (request: { body?: unknown }) => (request.body || {}) as Record<s
 const digits = (value: unknown) => String(value ?? '').replace(/\D/g, '');
 const monthPattern = /^\d{4}-(0[1-9]|1[0-2])$/;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+const WEEKDAYS = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
 
 export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
   const auth = routes(app);
@@ -71,45 +74,84 @@ export async function registerFinanceMonthlyRoutes(app: FastifyInstance) {
     return { ok: true, bookingCompleted: result.completed };
   });
 
-  app.get('/api/monthly-members', auth, async (request) => {
-    const companyId = companyOf(request), q = request.query as { cycle?: string }, cycle = q.cycle || new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date()).slice(0, 7);
-    if (!monthPattern.test(cycle)) throw fail(400, 'Mês inválido.');
-    const members = await db.select({ member: monthlyMembers, clientName: clients.name, phone: clients.phone, courtName: courts.name }).from(monthlyMembers).innerJoin(clients, eq(monthlyMembers.clientId, clients.id)).innerJoin(courts, eq(monthlyMembers.courtId, courts.id)).where(eq(monthlyMembers.companyId, companyId)).orderBy(asc(monthlyMembers.status), asc(monthlyMembers.weekday), asc(monthlyMembers.startTime));
+  // Garante a cobrança do mês para os planos ativos (uma por plano, vencimento no dia escolhido no plano).
+  async function ensureCharges(companyId: string, cycle: string) {
+    const active = await db.select().from(monthlyMembers).where(and(eq(monthlyMembers.companyId, companyId), eq(monthlyMembers.status, 'active')));
     const now = new Date().toISOString();
-    for (const { member } of members.filter((r) => r.member.status === 'active')) await db.insert(monthlyCharges).values({ id: randomUUID(), companyId, memberId: member.id, cycle, amountCents: member.amountCents, dueDate: `${cycle}-05`, paidAt: null, createdAt: now }).onConflictDoNothing();
-    const chargeRows = await db.select({ charge: monthlyCharges, clientId: monthlyMembers.clientId, courtId: monthlyMembers.courtId, clientName: clients.name, courtName: courts.name }).from(monthlyCharges).innerJoin(monthlyMembers, eq(monthlyCharges.memberId, monthlyMembers.id)).innerJoin(clients, eq(monthlyMembers.clientId, clients.id)).innerJoin(courts, eq(monthlyMembers.courtId, courts.id)).where(and(eq(monthlyCharges.companyId, companyId), eq(monthlyCharges.cycle, cycle))).orderBy(asc(clients.name));
-    return { cycle, members: members.map(({ member: m, clientName, phone, courtName }) => ({ ...m, client_name: clientName, phone, court_name: courtName, weekday: m.weekday, start_time: m.startTime, duration_minutes: m.durationMinutes, amount_cents: m.amountCents, created_at: m.createdAt })), charges: chargeRows.map(({ charge: c, clientName, courtName, clientId, courtId }) => ({ ...c, client_id: clientId, court_id: courtId, client_name: clientName, court_name: courtName, amount_cents: c.amountCents, due_date: c.dueDate, paid_at: c.paidAt })) };
+    for (const member of active) await db.insert(monthlyCharges).values({ id: randomUUID(), companyId, memberId: member.id, cycle, amountCents: member.amountCents, dueDate: dueDateOf(cycle, member.dueDay), paidAt: null, createdAt: now }).onConflictDoNothing();
+  }
+  app.get('/api/monthly-members', auth, async (request) => {
+    const companyId = companyOf(request), q = request.query as { cycle?: string }, cycle = q.cycle || (await arenaToday(companyId)).slice(0, 7);
+    if (!monthPattern.test(cycle)) throw fail(400, 'Mês inválido.');
+    await ensureCharges(companyId, cycle);
+    const [members, slotRows] = await Promise.all([
+      db.select({ member: monthlyMembers, clientName: clients.name, phone: clients.phone }).from(monthlyMembers).innerJoin(clients, eq(monthlyMembers.clientId, clients.id)).where(eq(monthlyMembers.companyId, companyId)).orderBy(asc(monthlyMembers.status), asc(clients.name)),
+      db.select({ slot: monthlyMemberSlots, courtName: courts.name }).from(monthlyMemberSlots).innerJoin(courts, eq(monthlyMemberSlots.courtId, courts.id)).where(eq(monthlyMemberSlots.companyId, companyId)).orderBy(asc(monthlyMemberSlots.weekday), asc(monthlyMemberSlots.startTime)),
+    ]);
+    const slotsOf = (memberId: string) => slotRows.filter((r) => r.slot.memberId === memberId).map(({ slot: s, courtName }) => ({ id: s.id, court_id: s.courtId, court_name: courtName, weekday: s.weekday, start_time: s.startTime, duration_minutes: s.durationMinutes }));
+    const courtsOf = (memberId: string) => [...new Set(slotsOf(memberId).map((s) => s.court_name))].join(', ');
+    const chargeRows = await db.select({ charge: monthlyCharges, clientId: monthlyMembers.clientId, clientName: clients.name }).from(monthlyCharges).innerJoin(monthlyMembers, eq(monthlyCharges.memberId, monthlyMembers.id)).innerJoin(clients, eq(monthlyMembers.clientId, clients.id)).where(and(eq(monthlyCharges.companyId, companyId), eq(monthlyCharges.cycle, cycle))).orderBy(asc(monthlyCharges.dueDate), asc(clients.name));
+    return {
+      cycle,
+      members: members.map(({ member: m, clientName, phone }) => ({ id: m.id, clientId: m.clientId, client_name: clientName, phone, status: m.status, amount_cents: m.amountCents, due_day: m.dueDay, auto_charge: m.autoCharge, created_at: m.createdAt, slots: slotsOf(m.id) })),
+      charges: chargeRows.map(({ charge: c, clientName, clientId }) => ({ id: c.id, memberId: c.memberId, client_id: clientId, client_name: clientName, court_name: courtsOf(c.memberId), cycle: c.cycle, amount_cents: c.amountCents, due_date: c.dueDate, paid_at: c.paidAt })),
+    };
   });
-  // Mesma validação para cadastrar e editar: dia/horário, funcionamento da arena, outro mensalista e agenda dos próximos 90 dias.
-  async function validateMonthlySlot(companyId: string, input: Record<string, unknown>, ignoreMemberId?: string) {
-    const courtId = String(input.courtId || ''), weekday = Number(input.weekday), startTime = String(input.startTime || ''), durationMinutes = Number(input.durationMinutes), amountCents = Math.round(Number(input.amountCents));
+  // Um horário do plano: funcionamento da arena, outro mensalista e agenda dos próximos 90 dias (mesma regra para cadastrar e editar).
+  async function validateMonthlySlot(companyId: string, slot: PlanSlot, ignoreMemberId?: string) {
+    const { courtId, weekday, startTime, durationMinutes } = slot;
     const court = (await db.select().from(courts).where(and(eq(courts.id, courtId), eq(courts.companyId, companyId), eq(courts.active, true))).limit(1))[0];
     if (!court) throw fail(404, 'Quadra não encontrada ou pausada.');
-    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6 || !/^([01]\d|2[0-3]):(00|30)$/.test(startTime) || !Number.isInteger(durationMinutes) || durationMinutes < 60 || durationMinutes > 240 || durationMinutes % 30 || !Number.isInteger(amountCents) || amountCents <= 0) throw fail(400, 'Confira dia, horário, duração e valor do mensalista.');
+    const label = `${WEEKDAYS[weekday]} ${startTime} (${court.name})`;
     const startMin = Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)), endMin = startMin + durationMinutes, hours = (await db.select().from(companyHours).where(and(eq(companyHours.companyId, companyId), eq(companyHours.weekday, weekday))).limit(1))[0];
-    if (!hours?.isOpen || startTime < hours.openTime || endMin > Number(hours.closeTime.slice(0, 2)) * 60 + Number(hours.closeTime.slice(3))) throw fail(400, 'O horário recorrente fica fora do funcionamento da arena.');
-    const existing = await db.select().from(monthlyMembers).where(and(eq(monthlyMembers.companyId, companyId), eq(monthlyMembers.courtId, courtId), eq(monthlyMembers.weekday, weekday), eq(monthlyMembers.status, 'active')));
-    if (existing.some((m) => { if (m.id === ignoreMemberId) return false; const start = Number(m.startTime.slice(0, 2)) * 60 + Number(m.startTime.slice(3)); return start < endMin && start + m.durationMinutes > startMin; })) throw fail(409, 'Já existe mensalista nesse horário recorrente.');
-    const today = new Date(`${new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date())}T12:00:00Z`), end = new Date(today); end.setUTCDate(end.getUTCDate() + 90); while (today.getUTCDay() !== weekday) today.setUTCDate(today.getUTCDate() + 1);
+    if (!hours?.isOpen || startTime < hours.openTime || endMin > Number(hours.closeTime.slice(0, 2)) * 60 + Number(hours.closeTime.slice(3))) throw fail(400, `O horário de ${label} fica fora do funcionamento da arena.`);
+    const existing = await db.select({ memberId: monthlyMemberSlots.memberId, startTime: monthlyMemberSlots.startTime, durationMinutes: monthlyMemberSlots.durationMinutes }).from(monthlyMemberSlots).innerJoin(monthlyMembers, eq(monthlyMemberSlots.memberId, monthlyMembers.id))
+      .where(and(eq(monthlyMemberSlots.companyId, companyId), eq(monthlyMemberSlots.courtId, courtId), eq(monthlyMemberSlots.weekday, weekday), eq(monthlyMembers.status, 'active')));
+    if (existing.some((m) => { if (m.memberId === ignoreMemberId) return false; const start = Number(m.startTime.slice(0, 2)) * 60 + Number(m.startTime.slice(3)); return start < endMin && start + m.durationMinutes > startMin; })) throw fail(409, `Já existe outro mensalista em ${label}.`);
+    const today = new Date(`${await arenaToday(companyId)}T12:00:00Z`), end = new Date(today); end.setUTCDate(end.getUTCDate() + 90); while (today.getUTCDay() !== weekday) today.setUTCDate(today.getUTCDate() + 1);
     const candidates: string[] = []; for (const cursor = new Date(today); cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 7)) candidates.push(cursor.toISOString().slice(0, 10));
-    for (const day of candidates) { const from = `${day}T${startTime}:00.000Z`, to = new Date(Date.parse(from) + durationMinutes * 60000).toISOString(); const [conflict, block] = await Promise.all([db.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, courtId), ne(bookings.status, 'cancelled'), sql`${bookings.startAt} < ${to}`, sql`${bookings.endAt} > ${from}`)).limit(1), db.select({ id: blockedSlots.id }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), sql`${blockedSlots.startAt} < ${to}`, sql`${blockedSlots.endAt} > ${from}`)).limit(1)]); if (conflict.length || block.length) throw fail(409, `O horário recorrente conflita com a agenda em ${day}.`); }
-    return { courtId, weekday, startTime, durationMinutes, amountCents };
+    for (const day of candidates) { const from = `${day}T${startTime}:00.000Z`, to = new Date(Date.parse(from) + durationMinutes * 60000).toISOString(); const [conflict, block] = await Promise.all([db.select({ id: bookings.id }).from(bookings).where(and(eq(bookings.companyId, companyId), eq(bookings.courtId, courtId), ne(bookings.status, 'cancelled'), sql`${bookings.startAt} < ${to}`, sql`${bookings.endAt} > ${from}`)).limit(1), db.select({ id: blockedSlots.id }).from(blockedSlots).where(and(eq(blockedSlots.companyId, companyId), eq(blockedSlots.courtId, courtId), sql`${blockedSlots.startAt} < ${to}`, sql`${blockedSlots.endAt} > ${from}`)).limit(1)]); if (conflict.length || block.length) throw fail(409, `O horário de ${label} conflita com a agenda em ${day.split('-').reverse().join('/')}.`); }
   }
+  // Plano completo (horários, valor, vencimento e cobrança automática), validado do mesmo jeito para cadastrar e editar.
+  async function validatePlan(companyId: string, body: Record<string, unknown>, clientPhone: string | null, ignoreMemberId?: string) {
+    const parsed = parsePlanSlots(body);
+    if ('error' in parsed) throw fail(400, parsed.error);
+    const amountCents = Math.round(Number(body.amountCents)), dueDay = body.dueDay === undefined ? 5 : Number(body.dueDay), autoCharge = body.autoCharge === true;
+    if (!Number.isInteger(amountCents) || amountCents <= 0 || amountCents > 100000000) throw fail(400, 'Confira o valor mensal.');
+    if (!validDueDay(dueDay)) throw fail(400, 'Escolha um dia de vencimento entre 1 e 31.');
+    if (autoCharge && !clientPhone) throw fail(400, 'Cadastre o WhatsApp do cliente para cobrar automaticamente.');
+    for (const slot of parsed.slots) await validateMonthlySlot(companyId, slot, ignoreMemberId);
+    return { slots: parsed.slots, amountCents, dueDay, autoCharge };
+  }
+  const slotValues = (companyId: string, memberId: string, slots: PlanSlot[], createdAt: string) => slots.map((s) => ({ id: randomUUID(), companyId, memberId, ...s, createdAt }));
   app.post('/api/monthly-members', auth, async (request, reply) => {
     const user = adminOf(request), companyId = companyOf(request), b = bodyOf(request), clientId = String(b.clientId || '');
     const client = (await db.select().from(clients).where(and(eq(clients.id, clientId), eq(clients.companyId, companyId))).limit(1))[0];
     if (!client) throw fail(404, 'Cliente não encontrado.');
-    const slot = await validateMonthlySlot(companyId, b);
-    const id = randomUUID(), createdAt = new Date().toISOString(); await db.insert(monthlyMembers).values({ id, companyId, clientId, ...slot, status: 'active', createdAt }); await audit(companyId, user.id, 'monthly_member.created', 'monthly_member', id); return reply.code(201).send({ id });
+    const plan = await validatePlan(companyId, b, client.phone);
+    const id = randomUUID(), createdAt = new Date().toISOString();
+    await db.transaction(async (tx) => {
+      await tx.insert(monthlyMembers).values({ id, companyId, clientId, courtId: null, weekday: null, startTime: null, durationMinutes: null, amountCents: plan.amountCents, dueDay: plan.dueDay, autoCharge: plan.autoCharge, status: 'active', createdAt });
+      await tx.insert(monthlyMemberSlots).values(slotValues(companyId, id, plan.slots, createdAt));
+    });
+    await audit(companyId, user.id, 'monthly_member.created', 'monthly_member', id, { slots: plan.slots.length, dueDay: plan.dueDay, autoCharge: plan.autoCharge });
+    return reply.code(201).send({ id });
   });
   app.patch('/api/monthly-members/:id', auth, async (request) => {
     const user = adminOf(request), companyId = companyOf(request), { id } = request.params as { id: string };
-    const current = (await db.select().from(monthlyMembers).where(and(eq(monthlyMembers.id, id), eq(monthlyMembers.companyId, companyId))).limit(1))[0];
+    const current = (await db.select({ member: monthlyMembers, phone: clients.phone }).from(monthlyMembers).innerJoin(clients, eq(monthlyMembers.clientId, clients.id)).where(and(eq(monthlyMembers.id, id), eq(monthlyMembers.companyId, companyId))).limit(1))[0];
     if (!current) throw fail(404, 'Mensalista não encontrado.');
-    if (current.status === 'ended') throw fail(409, 'Um plano encerrado não pode ser editado.');
-    const slot = await validateMonthlySlot(companyId, bodyOf(request), id);
-    await db.update(monthlyMembers).set(slot).where(and(eq(monthlyMembers.id, id), eq(monthlyMembers.companyId, companyId)));
-    await audit(companyId, user.id, 'monthly_member.updated', 'monthly_member', id, { before: { courtId: current.courtId, weekday: current.weekday, startTime: current.startTime, durationMinutes: current.durationMinutes, amountCents: current.amountCents } });
+    if (current.member.status === 'ended') throw fail(409, 'Um plano encerrado não pode ser editado.');
+    const plan = await validatePlan(companyId, bodyOf(request), current.phone, id), before = await db.select().from(monthlyMemberSlots).where(eq(monthlyMemberSlots.memberId, id));
+    const cycle = (await arenaToday(companyId)).slice(0, 7), createdAt = new Date().toISOString();
+    await db.transaction(async (tx) => {
+      await tx.update(monthlyMembers).set({ amountCents: plan.amountCents, dueDay: plan.dueDay, autoCharge: plan.autoCharge }).where(and(eq(monthlyMembers.id, id), eq(monthlyMembers.companyId, companyId)));
+      await tx.delete(monthlyMemberSlots).where(eq(monthlyMemberSlots.memberId, id));
+      await tx.insert(monthlyMemberSlots).values(slotValues(companyId, id, plan.slots, createdAt));
+      // Novo dia de vencimento vale para as cobranças em aberto deste mês em diante (o valor delas não muda).
+      if (plan.dueDay !== current.member.dueDay) for (const charge of await tx.select().from(monthlyCharges).where(and(eq(monthlyCharges.memberId, id), gte(monthlyCharges.cycle, cycle), sql`${monthlyCharges.paidAt} IS NULL`))) await tx.update(monthlyCharges).set({ dueDate: dueDateOf(charge.cycle, plan.dueDay) }).where(eq(monthlyCharges.id, charge.id));
+    });
+    await audit(companyId, user.id, 'monthly_member.updated', 'monthly_member', id, { before: { amountCents: current.member.amountCents, dueDay: current.member.dueDay, autoCharge: current.member.autoCharge, slots: before.map(({ courtId, weekday, startTime, durationMinutes }) => ({ courtId, weekday, startTime, durationMinutes })) } });
     return { ok: true };
   });
   app.patch('/api/monthly-members/:id/status', auth, async (request) => { const user = adminOf(request), companyId = companyOf(request), { id } = request.params as { id: string }, status = String(bodyOf(request).status || ''); if (!['active', 'paused', 'ended'].includes(status)) throw fail(400, 'Estado do mensalista inválido.'); const result = await db.update(monthlyMembers).set({ status }).where(and(eq(monthlyMembers.id, id), eq(monthlyMembers.companyId, companyId))).returning({ id: monthlyMembers.id }); if (!result.length) throw fail(404, 'Mensalista não encontrado.'); await audit(companyId, user.id, `monthly_member.${status}`, 'monthly_member', id); return { ok: true }; });

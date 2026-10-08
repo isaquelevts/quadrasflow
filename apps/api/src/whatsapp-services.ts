@@ -162,11 +162,12 @@ export async function registerWhatsAppServiceRoutes(app:FastifyInstance){
  app.get('/api/whatsapp/services',auth,async req=>{const id=companyOf(req);return {settings:await serviceSettings(id),arena:await arenaInformation(id),courts:await db.select({id:courts.id,name:courts.name,photos:courts.photos}).from(courts).where(eq(courts.companyId,id)).orderBy(courts.name)};});
  app.put('/api/whatsapp/services',auth,async req=>{
   adminOf(req);const id=companyOf(req),body=req.body as Record<string,any>,before=await serviceSettings(id),raw=body.settings||{},arena=body.arena||{};
-  const settings:ServiceSettings={...before,groupId:String(raw.groupId||''),groupEnabled:raw.groupEnabled===true,events:Array.isArray(raw.events)?raw.events.filter((v:unknown)=>serviceDefaults.events.includes(String(v))):[],reviewEnabled:raw.reviewEnabled===true,reviewDelayMinutes:Number(raw.reviewDelayMinutes),reviewMessage:String(raw.reviewMessage||'').trim(),manualResumeOnly:raw.manualResumeOnly!==false};
+  const settings:ServiceSettings={...before,groupId:String(raw.groupId||''),groupEnabled:raw.groupEnabled===true,events:Array.isArray(raw.events)?raw.events.filter((v:unknown)=>serviceDefaults.events.includes(String(v))):[],reviewEnabled:raw.reviewEnabled===true,reviewDelayMinutes:Number(raw.reviewDelayMinutes),reviewMessage:String(raw.reviewMessage||'').trim(),manualResumeOnly:raw.manualResumeOnly!==false,monthlyChargeMessage:raw.monthlyChargeMessage===undefined?before.monthlyChargeMessage:String(raw.monthlyChargeMessage||'').trim()};
   if(settings.groupId&&!/^\d+(?:-\d+)?@g\.us$/.test(settings.groupId))throw fail(400,'Selecione um grupo válido.');
   if(settings.groupEnabled&&!settings.groupId)throw fail(400,'Selecione o grupo de avisos.');
   if(!Number.isInteger(settings.reviewDelayMinutes)||settings.reviewDelayMinutes<0||settings.reviewDelayMinutes>1440)throw fail(400,'Use um intervalo entre 0 e 1440 minutos.');
   if(settings.reviewMessage.length>1200||!settings.reviewMessage.includes('{review_link}'))throw fail(400,'A mensagem deve conter {review_link} e até 1200 caracteres.');
+  if(!settings.monthlyChargeMessage||settings.monthlyChargeMessage.length>1200)throw fail(400,'Escreva a mensagem de cobrança dos mensalistas (até 1200 caracteres).');
   let links;try{links={mapsUrl:safePublicLink(arena.mapsUrl,'maps'),instagramUrl:safePublicLink(arena.instagramUrl,'instagram'),reviewUrl:safePublicLink(arena.reviewUrl,'review')};}catch(e){throw fail(400,(e as Error).message);}
   if(settings.reviewEnabled&&!links.reviewUrl)throw fail(400,'Cadastre o link de avaliação do Google.');
   if(settings.reviewEnabled&&!(await integration(id,'whatsapp_bot')).timeZone)throw fail(400,'Configure o fuso horário antes de ativar avaliações.');

@@ -1,9 +1,12 @@
 import {and,eq,gte,lte,sql} from 'drizzle-orm';
 import { isTestPhone } from './whatsapp-test-mode.js';
-import {bookings,companies,integrationSettings,whatsappDeliveries,whatsappMessages} from '@quadrasflow/database';
+import {randomUUID} from 'node:crypto';
+import {bookings,clients,companies,integrationSettings,monthlyCharges,monthlyMembers,whatsappDeliveries,whatsappMessages} from '@quadrasflow/database';
+import {localNow} from './arena-dates.js';
+import {chargeDueNow,chargeMessage,DEFAULT_CHARGE_MESSAGE,dueDateOf} from './monthly-plan.js';
 import {db} from './database.js';
 import {arenaInformation,enqueueDelivery,integration,localPhoto,serviceSettings,wahaRequest} from './whatsapp-services.js';
-import {bookingInstant,type ServiceSettings} from './whatsapp-service-rules.js';
+import {bookingInstant,chatDestination,type ServiceSettings} from './whatsapp-service-rules.js';
 import {isSimulatorPhone} from './whatsapp-simulation.js';
 
 let nextReviewScanAt=0;
@@ -18,6 +21,21 @@ export async function scheduleReviews(now=Date.now()){
   for(const b of list){const ended=bookingInstant(b.endAt,bot.timeZone),due=ended+cfg.reviewDelayMinutes*60000;
    if(!b.customerPhone||ended<Date.parse(cfg.reviewEnabledAt)||due>now||now-due>86400000)continue;
    await enqueueDelivery(row.companyId,'review',b.customerPhone,{},`review:${b.id}`,b.id,new Date(due).toISOString());
+  }
+ }
+}
+// Cobrança automática de mensalistas: uma mensagem por mensalidade, no dia do vencimento a partir das 9h da arena.
+let nextChargeScanAt=0;
+export async function scheduleMonthlyCharges(now=Date.now()){
+ if(now<nextChargeScanAt)return;nextChargeScanAt=now+5*60*1000;
+ const plans=await db.select({member:monthlyMembers,phone:clients.phone}).from(monthlyMembers).innerJoin(clients,eq(monthlyMembers.clientId,clients.id)).where(and(eq(monthlyMembers.status,'active'),eq(monthlyMembers.autoCharge,true)));
+ for(const companyId of [...new Set(plans.map(p=>p.member.companyId))]){
+  const bot=await integration(companyId,'whatsapp_bot');if(!bot.timeZone)continue;
+  const local=localNow(String(bot.timeZone),new Date(now)),cycle=local.date.slice(0,7),created=new Date(now).toISOString();
+  for(const {member,phone} of plans.filter(p=>p.member.companyId===companyId&&p.phone)){
+   await db.insert(monthlyCharges).values({id:randomUUID(),companyId,memberId:member.id,cycle,amountCents:member.amountCents,dueDate:dueDateOf(cycle,member.dueDay),paidAt:null,createdAt:created}).onConflictDoNothing();
+   const charge=(await db.select().from(monthlyCharges).where(and(eq(monthlyCharges.memberId,member.id),eq(monthlyCharges.cycle,cycle))).limit(1))[0];
+   if(charge&&!charge.paidAt&&chargeDueNow(charge.dueDate,local))await enqueueDelivery(companyId,'monthly_charge',phone!,{chargeId:charge.id},`monthly-charge:${charge.id}`,null,created);
   }
  }
 }
@@ -50,6 +68,12 @@ export async function deliverOne(id?:string){
    if(due>Date.now()){await db.update(whatsappDeliveries).set({status:'pending',dueAt:new Date(due).toISOString(),updatedAt:now}).where(eq(whatsappDeliveries.id,job.id));return true;}
    if(bookingInstant(b.endAt,bot.timeZone)<Date.parse(cfg.reviewEnabledAt)||Date.now()-due>86400000){await finish('skipped');return true;}
    text=cfg.reviewMessage.replace(/\{(nome|arena_name|review_link)\}/g,(_,key:string)=>({nome:b.customerName,arena_name:info.nome,review_link:info.reviewUrl})[key]!);
+  }else if(job.kind==='monthly_charge'){
+   // Confere de novo na hora de enviar: paga, plano pausado/encerrado ou cobrança desligada não manda nada.
+   const row=(await db.select({charge:monthlyCharges,member:monthlyMembers,name:clients.name,phone:clients.phone}).from(monthlyCharges).innerJoin(monthlyMembers,eq(monthlyCharges.memberId,monthlyMembers.id)).innerJoin(clients,eq(monthlyMembers.clientId,clients.id)).where(and(eq(monthlyCharges.id,String(job.payload.chargeId||'')),eq(monthlyCharges.companyId,job.companyId))).limit(1))[0];
+   if(!row||row.charge.paidAt||row.member.status!=='active'||!row.member.autoCharge||!row.phone||chatDestination(row.phone)!==job.destination){await finish('skipped');return true;}
+   const info=await arenaInformation(job.companyId);
+   text=chargeMessage(cfg.monthlyChargeMessage||DEFAULT_CHARGE_MESSAGE,{name:row.name,arena:info.nome,amountCents:row.charge.amountCents,dueDate:row.charge.dueDate,cycle:row.charge.cycle});
   }else if(job.kind==='expired'&&!group){
    const p=job.payload;
    text=`⏰ O prazo do Pix acabou e a reserva de ${p.court}, ${String(p.start).slice(0,10).split('-').reverse().join('/')} das ${String(p.start).slice(11,16)} às ${String(p.end).slice(11,16)}, foi cancelada. O horário voltou a ficar disponível.\n\nSe ainda quiser jogar, é só me chamar que faço uma nova reserva.`;
@@ -75,5 +99,5 @@ export async function deliverOne(id?:string){
 let running=false;
 export async function processWhatsAppDeliveries(){if(running)return;running=true;try{
  await db.update(whatsappDeliveries).set({status:'unknown',error:'Processamento interrompido. Confira a entrega no WhatsApp.'}).where(and(eq(whatsappDeliveries.status,'sending'),lte(whatsappDeliveries.updatedAt,new Date(Date.now()-5*60000).toISOString())));
- await scheduleReviews();for(let i=0;i<30;i++){if(!await deliverOne())break;}
+ await scheduleReviews();await scheduleMonthlyCharges();for(let i=0;i<30;i++){if(!await deliverOne())break;}
 }finally{running=false;}}
