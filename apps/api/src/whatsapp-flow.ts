@@ -170,7 +170,7 @@ export function dayScheduleMessage(a: { dayLabel: string; period: Period | null;
   const withTimes = a.courts.filter((c) => c.times.length).sort((x, y) => y.times.length - x.times.length);
   if (!withTimes.length) return `📅 ${a.dayLabel}. Não tenho horários livres${where}${a.durationText ? ` para ${a.durationText}` : ''} nesse dia. Quer ver ${a.period ? 'outro período ou ' : ''}outro dia? 😊`;
   const MAX_COURTS = 6, shown = new Set(withTimes.slice(0, MAX_COURTS));
-  const blocks = a.courts.filter((c) => !c.times.length || shown.has(c)).map((c) => c.times.length ? `🏟️ ${c.name} · ${c.sport}${c.block ? ` (reservas de ${c.block})` : ''}\n${timesLine(c.times)}` : `🏟️ ${c.name} · ${c.sport} — sem horários livres${where}`);
+  const blocks = a.courts.filter((c) => !c.times.length || shown.has(c)).map((c) => c.times.length ? `🏟️ ${c.name} · ${c.sport}${c.block ? ` (mínimo de ${c.block})` : ''}\n${timesLine(c.times)}` : `🏟️ ${c.name} · ${c.sport} — sem horários livres${where}`);
   const more = withTimes.length - shown.size;
   return `📅 ${a.dayLabel}. Horários livres${where}${a.durationText ? ` para ${a.durationText}` : ''}:\n\n${blocks.join('\n\n')}${more > 0 ? `\n\nTem mais ${more} ${more === 1 ? 'quadra' : 'quadras'} com horários livres; me diz o horário que eu mostro.` : ''}\n\nQue horas você quer jogar e por quanto tempo? 🙂`;
 }

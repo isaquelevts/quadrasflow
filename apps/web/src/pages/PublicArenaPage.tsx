@@ -12,7 +12,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
 import { durationLabel, errorMessage, formatCurrency, formatDate, initials, isoAt, minutesOf, whatsappLink } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import { firstStart, minDuration, rulesOf, ruleProblem, ruleProblemText, type CourtRules } from '@/lib/court-rules';
+import { firstStart, gridStep, minDuration, rulesOf, ruleProblem, ruleProblemText, type CourtRules } from '@/lib/court-rules';
 
 type Court = { id: string; name: string; sport: string; price_cents: number; photo_url: string | null; rules?: CourtRules; location?: { name: string; address: string; maps_url: string } };
 /** Quadra em endereço próprio: "Unidade Centro — Rua A, 10". */
@@ -111,7 +111,7 @@ function BookingPage({ slug }: { slug: string }) {
   // Inícios: de 30 em 30 ou só horas cheias, e só os que têm pelo menos um fim válido.
   const startsFor = useCallback((id: string) => {
     if (!data?.hours.is_open) return [] as number[];
-    const rules = rulesFor(id), step = rules.step, out: number[] = [];
+    const rules = rulesFor(id), step = gridStep(rules), out: number[] = [];
     for (let t = firstStart(rules, Math.max(open, notBefore), open); t + MIN_DURATION <= close; t += step) if (endsFor(id, t).length) out.push(t);
     return out;
   }, [data, rulesFor, endsFor, open, close, notBefore]);
@@ -265,7 +265,7 @@ function BookingPage({ slug }: { slug: string }) {
             <div className="space-y-4">
               {([['Manhã', Sunrise, 0, 720], ['Tarde', Sun, 720, 1080], ['Noite', Moon, 1080, 1440], ['Madrugada', Moon, 1440, 2880]] as const).map(([label, Icon, a, b]) => {
                 // Só inícios que ainda podem acontecer (não passados e com 1h antes de fechar); riscado = ocupado.
-                const starts = startsFor(courtId), step = rulesFor(courtId).step, slots: number[] = []; for (let t = firstStart(rulesFor(courtId), Math.max(a, open, notBefore), open); t < b && t + minDuration(rulesFor(courtId)) <= close; t += step) slots.push(t);
+                const starts = startsFor(courtId), step = gridStep(rulesFor(courtId)), slots: number[] = []; for (let t = firstStart(rulesFor(courtId), Math.max(a, open, notBefore), open); t < b && t + minDuration(rulesFor(courtId)) <= close; t += step) slots.push(t);
                 if (!slots.length) return null;
                 if (!slots.some((t) => starts.includes(t))) return <div key={label} className="flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground/60 uppercase"><Icon className="size-3.5" aria-hidden="true" />{label} · sem horários</div>;
                 return <div key={label}><div className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground uppercase"><Icon className="size-3.5" aria-hidden="true" />{label}</div>

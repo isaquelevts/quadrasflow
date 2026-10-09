@@ -1,7 +1,7 @@
 // Regras de horário por quadra (sem banco, para poder testar isolado). Minutos desde 00:00.
 // - step 30: começa de 30 em 30 e dura 1h, 1h30, 2h… (padrão, como antes)
 // - step 60: só horas cheias — começa em hora cheia e dura 1h, 2h, 3h…
-// - step 120/180: blocos de 2h ou 3h contados a partir da abertura do dia (abre às 8h → 8h, 10h, 12h…) e dura 2h, 4h… (ou 3h, 6h…)
+// - step 120/180: horas cheias com duração mínima de 2h ou 3h — começa em qualquer hora cheia e dura 2h, 3h, 4h… (ou 3h, 4h…)
 // - prime (horário nobre): nos dias e no intervalo da regra, a reserva que pegar qualquer parte dele precisa durar
 //   pelo menos `minMinutes` no total (ex.: das 19h às 21h, mínimo 2h → 19h–20h não; 18h–20h sim).
 
@@ -34,13 +34,13 @@ export function parseCourtRules(raw: unknown): CourtRules {
 /** Valida o que vem das Configurações; devolve a mensagem de erro ou as regras normalizadas. */
 export function validateCourtRules(input: unknown): { error: string } | { rules: CourtRules } {
   const r = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
-  if (!STEPS.includes(r.step as Step)) return { error: 'Escolha se a quadra aceita horários de 30 em 30 minutos, de hora em hora, de 2 em 2 horas ou de 3 em 3 horas.' };
+  if (!STEPS.includes(r.step as Step)) return { error: 'Escolha se a quadra aceita horários de 30 em 30 minutos, só horas cheias, ou horas cheias com mínimo de 2h ou de 3h.' };
   const list = Array.isArray(r.prime) ? r.prime : [];
   if (list.length > 10) return { error: 'Use no máximo 10 regras de horário nobre por quadra.' };
   const rules = parseCourtRules(r);
   if (rules.prime.length !== list.length) return { error: 'Confira as regras de horário nobre: escolha os dias, um intervalo válido e a duração mínima (de 1h a 8h).' };
   if (rules.step === 60 && rules.prime.some((p) => p.minMinutes % 60)) return { error: 'Com horas cheias, a duração mínima do horário nobre também precisa ser em horas cheias.' };
-  if (rules.step > 60 && rules.prime.some((p) => p.minMinutes % rules.step)) return { error: `Com blocos de ${rules.step / 60}h, a duração mínima do horário nobre precisa ser ${rules.step / 60}h, ${rules.step / 30}h…` };
+  if (rules.step > 60 && rules.prime.some((p) => p.minMinutes % 60)) return { error: 'Com mínimo de 2h ou 3h, a duração mínima do horário nobre também precisa ser em horas cheias.' };
   return { rules };
 }
 
@@ -50,16 +50,21 @@ export function primeMinimum(rules: CourtRules, weekday: number, start: number, 
 }
 
 /** Ponto de partida da grade: 30 min e 1h contam desde 00:00; blocos de 2h e 3h, desde a abertura do dia. */
-export const gridBase = (rules: CourtRules, opening = 0) => rules.step > 60 ? opening : 0;
+/** Passo dos inícios e das durações: 30 min ou hora cheia (as opções de 2h e 3h também começam em qualquer hora cheia). */
+export const gridStep = (rules: CourtRules) => Math.min(rules.step, 60);
+/** Duração mínima exigida pela opção da quadra (2h ou 3h); nas demais, 0. */
+export const courtMinimum = (rules: CourtRules) => rules.step > 60 ? rules.step : 0;
+/** Mantido para quem ainda passa a abertura: a grade sempre conta de 00:00. */
+export const gridBase = (_rules: CourtRules, _opening = 0) => 0;
 /** Primeiro início válido da grade a partir de `from` (minutos). */
-export const firstStart = (rules: CourtRules, from: number, opening = 0) => { const base = gridBase(rules, opening); return base + Math.ceil((from - base) / rules.step) * rules.step; };
+export const firstStart = (rules: CourtRules, from: number, _opening = 0) => Math.ceil(from / gridStep(rules)) * gridStep(rules);
 
-export type RuleProblem = { kind: 'start' | 'duration' | 'prime'; minMinutes?: number; rule?: PrimeRule; step?: Step; base?: number };
+export type RuleProblem = { kind: 'start' | 'duration' | 'prime' | 'minimum'; minMinutes?: number; rule?: PrimeRule; step?: Step; base?: number };
 /** A reserva respeita as regras da quadra? `opening`: abertura do dia em minutos (base da grade de 2h/3h). O funcionamento, conflitos e o mínimo de 1h são checados em outro lugar. */
-export function ruleProblem(rules: CourtRules, weekday: number, start: number, end: number, opening = 0): RuleProblem | null {
-  const base = gridBase(rules, opening);
-  if (rules.step > 30 && (start - base) % rules.step) return { kind: 'start', step: rules.step, base };
-  if (rules.step > 30 && (end - start) % rules.step) return { kind: 'duration', step: rules.step };
+export function ruleProblem(rules: CourtRules, weekday: number, start: number, end: number, _opening = 0): RuleProblem | null {
+  if (rules.step > 30 && start % 60) return { kind: 'start', step: 60 };
+  if (rules.step > 30 && (end - start) % 60) return { kind: 'duration', step: 60 };
+  if (courtMinimum(rules) && end - start < courtMinimum(rules)) return { kind: 'minimum', minMinutes: courtMinimum(rules) };
   const min = primeMinimum(rules, weekday, start, end);
   if (min && end - start < min) {
     const rule = rules.prime.find((p) => p.days.includes(weekday) && toMin(p.from) < end && toMin(p.to) > start && p.minMinutes === min)!;
@@ -77,10 +82,8 @@ export function primeWhen(rule: PrimeRule) {
 
 /** Explicação para o cliente (WhatsApp, página e servidor). */
 export function ruleProblemText(problem: RuleProblem, courtName: string) {
-  const step = problem.step ?? 60, hours = step / 60;
-  if (problem.kind === 'start' && step > 60) { const b = problem.base ?? 0; return `Na ${courtName} os horários são de ${hours} em ${hours} horas, a partir das ${hourText(b)} (${[b, b + step, b + 2 * step].filter((m) => m < 1440).map(hourText).join(', ')}…).`; }
+  if (problem.kind === 'minimum') return `A ${courtName} é alugada por no mínimo ${problem.minMinutes! / 60}h (pode começar em qualquer hora cheia).`;
   if (problem.kind === 'start') return `Na ${courtName} os horários começam sempre em hora cheia (19:00, 20:00…).`;
-  if (problem.kind === 'duration' && step > 60) return `A ${courtName} é alugada em blocos de ${hours}h (${hours}h, ${hours * 2}h, ${hours * 3}h…).`;
   if (problem.kind === 'duration') return `A ${courtName} é alugada só em horas cheias (1h, 2h, 3h…).`;
   return `No horário nobre (${primeWhen(problem.rule!)}), a ${courtName} é alugada por no mínimo ${durText(problem.minMinutes!)}.`;
 }

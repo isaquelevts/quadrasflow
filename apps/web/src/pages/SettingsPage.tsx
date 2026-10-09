@@ -236,13 +236,14 @@ function Amenities({ value, onChange }: { value: string[]; onChange: (value: str
 const WEEK = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const RULE_TIMES = [...Array.from({ length: 48 }, (_, i) => `${String(Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`), '24:00'];
 const MINIMUMS = Array.from({ length: 15 }, (_, i) => 60 + i * 30);
-/** Regras de uma quadra: grade (30 min, 1h, 2h ou 3h) e a lista de horários nobres. Cada quadra salva sozinha. */
+/** Regras de uma quadra: 30 em 30, horas cheias ou horas cheias com mínimo de 2h/3h, e a lista de horários nobres. Cada quadra salva sozinha. */
 function CourtRulesEditor({ court, onSaved }: { court: RuleCourt; onSaved: (rules: CourtRules) => void }) {
   const [rules, setRules] = useState<CourtRules>(court.rules);
   const [saving, setSaving] = useState(false);
   const changed = JSON.stringify(rules) !== JSON.stringify(court.rules);
   const setPrime = (i: number, patch: Partial<PrimeRule>) => setRules((r) => ({ ...r, prime: r.prime.map((p, k) => k === i ? { ...p, ...patch } : p) }));
-  const minimums = MINIMUMS.filter((m) => m % rules.step === 0);
+  // Mínimo do horário nobre: de 30 em 30 só na quadra de 30 min; nas demais, horas cheias a partir do mínimo da quadra.
+  const minimums = MINIMUMS.filter((m) => rules.step === 30 || (m % 60 === 0 && m >= Math.max(60, rules.step)));
   async function save() {
     setSaving(true);
     try { const result = await api<{ court: RuleCourt }>(`/api/courts/${court.id}/rules`, { method: 'PUT', body: JSON.stringify(rules) }); onSaved(rulesOf(result.court.rules)); setRules(rulesOf(result.court.rules)); toast.success(`Regras da ${court.name} salvas`); }
@@ -253,8 +254,8 @@ function CourtRulesEditor({ court, onSaved }: { court: RuleCourt; onSaved: (rule
     <div className="flex flex-wrap items-baseline justify-between gap-2"><h3 className="font-semibold">{court.name} <span className="font-normal text-muted-foreground">· {court.sport}</span></h3>
       {rules.prime.length > 0 && <span className="text-[12px] text-muted-foreground">{rules.prime.length} {rules.prime.length === 1 ? 'regra' : 'regras'} de horário nobre</span>}</div>
     <div className="space-y-1.5"><div className="text-[13px] font-medium" id={`step-${court.id}`}>Horários de reserva</div>
-      <RadioGroup aria-labelledby={`step-${court.id}`} value={String(rules.step)} onValueChange={(v) => setRules((r) => { const step = rulesOf({ step: Number(v) as Step }).step; return { step, prime: r.prime.map((p) => ({ ...p, minMinutes: Math.ceil(p.minMinutes / step) * step > 480 ? Math.floor(480 / step) * step : Math.ceil(p.minMinutes / step) * step })) }; })} className="grid gap-2 sm:grid-cols-2">
-        {([['30', 'De 30 em 30 minutos', 'Começa às 19:00 ou 19:30; dura 1h, 1h30, 2h…'], ['60', 'Só horas cheias', 'Começa às 19:00, 20:00…; dura 1h, 2h, 3h…'], ['120', 'De 2 em 2 horas', 'Blocos a partir da abertura (abre às 8h: 8h, 10h, 12h…); dura 2h, 4h…'], ['180', 'De 3 em 3 horas', 'Blocos a partir da abertura (abre às 8h: 8h, 11h, 14h…); dura 3h, 6h…']] as const).map(([value, title, text]) => <Label key={value} htmlFor={`step-${court.id}-${value}`} className={cn('flex cursor-pointer items-start gap-3 rounded-lg border p-3 font-normal leading-normal transition', String(rules.step) === value ? 'border-brand-500 bg-brand-50/60' : 'hover:bg-muted/40')}>
+      <RadioGroup aria-labelledby={`step-${court.id}`} value={String(rules.step)} onValueChange={(v) => setRules((r) => { const step = rulesOf({ step: Number(v) as Step }).step; return { step, prime: r.prime.map((p) => ({ ...p, minMinutes: Math.max(step > 30 ? Math.ceil(p.minMinutes / 60) * 60 : p.minMinutes, step > 60 ? step : 0) })) }; })} className="grid gap-2 sm:grid-cols-2">
+        {([['30', 'De 30 em 30 minutos', 'Começa às 19:00 ou 19:30; dura 1h, 1h30, 2h…'], ['60', 'Só horas cheias', 'Começa às 19:00, 20:00…; dura 1h, 2h, 3h…'], ['120', 'Mínimo de 2 horas', 'Começa em qualquer hora cheia (19:00, 20:00…); dura 2h, 3h, 4h…'], ['180', 'Mínimo de 3 horas', 'Começa em qualquer hora cheia (19:00, 20:00…); dura 3h, 4h, 5h…']] as const).map(([value, title, text]) => <Label key={value} htmlFor={`step-${court.id}-${value}`} className={cn('flex cursor-pointer items-start gap-3 rounded-lg border p-3 font-normal leading-normal transition', String(rules.step) === value ? 'border-brand-500 bg-brand-50/60' : 'hover:bg-muted/40')}>
           <RadioGroupItem id={`step-${court.id}-${value}`} value={value} className="mt-0.5" /><span className="space-y-0.5"><span className="block font-medium leading-snug">{title}</span><span className="block text-[12.5px] leading-snug text-muted-foreground">{text}</span></span></Label>)}
       </RadioGroup></div>
     <div className="space-y-2"><div className="text-[13px] font-medium">Horário nobre</div>

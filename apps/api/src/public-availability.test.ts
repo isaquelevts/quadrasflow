@@ -40,11 +40,10 @@ test('horário nobre: 19h só aparece se couber o mínimo', () => {
   assert.ok(freeStarts(h('08:00'), h('23:00'), 0, [], r, 4).includes(h('19:00')) && endOptions(h('19:00'), h('23:00'), [], 480, r, 4)[0] === h('20:00'), 'outro dia sem regra');
 });
 
-test('blocos de 2h: inícios e fins seguem a grade a partir da abertura', () => {
+test('mínimo de 2h: todos os inícios em hora cheia, fins a partir de +2h', () => {
   const r: CourtRules = { step: 120, prime: [] };
-  assert.deepEqual(freeStarts(h('08:00'), h('16:00'), 0, [], r), [h('08:00'), h('10:00'), h('12:00'), h('14:00')]);
-  assert.deepEqual(freeStarts(h('08:00'), h('16:00'), h('09:30'), [], r), [h('10:00'), h('12:00'), h('14:00')], 'hoje às 9h30: próximo bloco às 10h');
-  assert.deepEqual(endOptions(h('10:00'), h('16:00'), [], 480, r, 3, h('08:00')), [h('12:00'), h('14:00'), h('16:00')]);
-  assert.deepEqual(freeStarts(h('08:00'), h('16:00'), 0, [{ start: h('12:00'), end: h('13:00') }], r), [h('08:00'), h('10:00'), h('14:00')], 'bloco ocupado some');
-  assert.deepEqual(freeStarts(h('07:00'), h('13:00'), 0, [], { step: 180, prime: [] }), [h('07:00'), h('10:00')], 'abre às 7h, blocos de 3h');
+  assert.deepEqual(freeStarts(h('08:00'), h('13:00'), 0, [], r), [h('08:00'), h('09:00'), h('10:00'), h('11:00')]);
+  assert.deepEqual(endOptions(h('10:00'), h('15:00'), [], 480, r, 3), [h('12:00'), h('13:00'), h('14:00'), h('15:00')]);
+  assert.deepEqual(freeStarts(h('08:00'), h('13:00'), 0, [{ start: h('11:00'), end: h('12:00') }], r), [h('08:00'), h('09:00')], 'só cabem 2h antes da reserva das 11h');
+  assert.deepEqual(freeStarts(h('07:00'), h('13:00'), 0, [], { step: 180, prime: [] }), [h('07:00'), h('08:00'), h('09:00'), h('10:00')]);
 });

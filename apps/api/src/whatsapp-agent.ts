@@ -213,7 +213,7 @@ type ActiveCourt = { id: string; name: string; sport: string };
 /** Inícios livres de cada quadra no dia, para a duração dada (já sem horários que passaram hoje) e, se houver, só do período. */
 async function courtTimes(deps: AgentDeps, companyId: string, active: readonly ActiveCourt[], day: string, minutes: number, period: Period | null) {
   const rows = await Promise.all(active.map(async (court) => {
-    // Quadra em blocos de 2h/3h: lista os inícios do bloco dela (com 1h nenhum caberia).
+    // Quadra com mínimo de 2h/3h: lista os inícios para o mínimo dela (com 1h nenhum caberia).
     const fitted = await deps.courtDuration(court.id, minutes), free = await deps.availability(companyId, court.id, day, fitted);
     return { open: free.open, name: court.name, sport: court.sport, block: fitted !== minutes ? durationLabel(fitted) : null, times: free.slots.map((x) => x.inicio).filter((t) => !period || periodOf(t) === period) };
   }));

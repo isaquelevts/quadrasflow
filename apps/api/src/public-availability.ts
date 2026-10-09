@@ -1,6 +1,6 @@
 // Horários livres da página pública (sem banco, para poder testar isolado). Minutos desde 00:00.
 import { DEFAULT_MAX_DURATION as MAX_DURATION, MIN_DURATION, STEP } from './booking-duration.js';
-import { DEFAULT_RULES, firstStart, ruleProblem, type CourtRules } from './court-rules.js';
+import { DEFAULT_RULES, firstStart, gridStep, ruleProblem, type CourtRules } from './court-rules.js';
 
 export { MAX_DURATION, MIN_DURATION, STEP };
 export type Busy = { start: number; end: number };
@@ -19,7 +19,7 @@ export function endOptions(start: number, close: number, busy: readonly Busy[], 
 
 /** Inícios possíveis (na grade da quadra: 30 min, 1h, 2h ou 3h) que têm pelo menos um fim válido. */
 export function freeStarts(open: number, close: number, notBefore: number, busy: readonly Busy[], rules: CourtRules = DEFAULT_RULES, weekday = 0, maxDuration = MAX_DURATION) {
-  const out: number[] = [], step = rules.step;
+  const out: number[] = [], step = gridStep(rules);
   for (let t = firstStart(rules, Math.max(open, notBefore), open); t + MIN_DURATION <= close; t += step) if (endOptions(t, close, busy, maxDuration, rules, weekday, open).length) out.push(t);
   return out;
 }
