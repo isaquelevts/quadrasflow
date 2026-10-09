@@ -2,14 +2,17 @@
 export type PrimeRule = { days: number[]; from: string; to: string; minMinutes: number };
 export type Step = 30 | 60 | 120 | 180;
 export const STEPS: readonly Step[] = [30, 60, 120, 180];
-export type CourtRules = { step: Step; prime: PrimeRule[] };
-export const DEFAULT_RULES: CourtRules = { step: 30, prime: [] };
+/** Horário de corte: ninguém atravessa `at`, exceto quem começa em `crossFrom` (ou antes) e vai até o fechamento. */
+export type CutRule = { days: number[]; at: string; crossFrom: string | null };
+export type CourtRules = { step: Step; prime: PrimeRule[]; cuts?: CutRule[] };
+export const DEFAULT_RULES: CourtRules = { step: 30, prime: [], cuts: [] };
+export const MAX_CUTS = 5;
 
 const toMin = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
 const hourText = (min: number) => `${Math.floor(min / 60)}h${min % 60 ? String(min % 60).padStart(2, '0') : ''}`;
 const DAY_SHORT = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
 
-export const rulesOf = (raw: Partial<CourtRules> | null | undefined): CourtRules => ({ step: STEPS.includes(raw?.step as Step) ? raw!.step as Step : 30, prime: Array.isArray(raw?.prime) ? raw!.prime : [] });
+export const rulesOf = (raw: Partial<CourtRules> | null | undefined): CourtRules => ({ step: STEPS.includes(raw?.step as Step) ? raw!.step as Step : 30, prime: Array.isArray(raw?.prime) ? raw!.prime : [], cuts: Array.isArray(raw?.cuts) ? raw!.cuts : [] });
 /** Ponto de partida da grade: 30 min e 1h contam desde 00:00; blocos de 2h e 3h, desde a abertura do dia. */
 /** Passo dos inícios e das durações: 30 min ou hora cheia (as opções de 2h e 3h também começam em qualquer hora cheia). */
 export const gridStep = (rules: CourtRules) => Math.min(rules.step, 60);
@@ -25,12 +28,22 @@ export const minDuration = (rules: CourtRules) => Math.max(60, rules.step);
 export function primeMinimum(rules: CourtRules, weekday: number, start: number, end: number) {
   return rules.prime.filter((p) => p.days.includes(weekday) && toMin(p.from) < end && toMin(p.to) > start).reduce((max, p) => Math.max(max, p.minMinutes), 0);
 }
-export type RuleProblem = { kind: 'start' | 'duration' | 'prime' | 'minimum'; minMinutes?: number; rule?: PrimeRule; step?: Step; base?: number };
-/** `opening`: abertura do dia em minutos (base da grade de 2h/3h). */
-export function ruleProblem(rules: CourtRules, weekday: number, start: number, end: number, _opening = 0): RuleProblem | null {
+/** Horário de corte que a reserva [start, end) atravessa sem poder (null = nenhum). `close`: fechamento do dia em minutos. */
+export function cutCrossed(rules: CourtRules, weekday: number, start: number, end: number, close?: number) {
+  return (rules.cuts ?? []).find((c) => {
+    const at = toMin(c.at);
+    if (!c.days.includes(weekday) || start >= at || end <= at) return false;
+    return !(c.crossFrom && start <= toMin(c.crossFrom) && close !== undefined && end === close);
+  }) ?? null;
+}
+export type RuleProblem = { kind: 'start' | 'duration' | 'prime' | 'minimum' | 'cut'; minMinutes?: number; rule?: PrimeRule; cut?: CutRule; step?: Step; base?: number };
+/** `close`: fechamento do dia em minutos (exceção do horário de corte). */
+export function ruleProblem(rules: CourtRules, weekday: number, start: number, end: number, _opening = 0, close?: number): RuleProblem | null {
   if (rules.step > 30 && start % 60) return { kind: 'start', step: 60 };
   if (rules.step > 30 && (end - start) % 60) return { kind: 'duration', step: 60 };
   if (courtMinimum(rules) && end - start < courtMinimum(rules)) return { kind: 'minimum', minMinutes: courtMinimum(rules) };
+  const cut = cutCrossed(rules, weekday, start, end, close);
+  if (cut) return { kind: 'cut', cut };
   const min = primeMinimum(rules, weekday, start, end);
   if (min && end - start < min) return { kind: 'prime', minMinutes: min, rule: rules.prime.find((p) => p.days.includes(weekday) && toMin(p.from) < end && toMin(p.to) > start && p.minMinutes === min)! };
   return null;
@@ -40,7 +53,14 @@ export function primeWhen(rule: PrimeRule) {
   const days = d.length === 7 ? 'todos os dias' : consecutive ? `${DAY_SHORT[d[0]!]} a ${DAY_SHORT[d.at(-1)!]}` : d.map((x) => DAY_SHORT[x]).join(', ');
   return `${days}, das ${hourText(toMin(rule.from))} às ${hourText(rule.to === '24:00' ? 1440 : toMin(rule.to))}`;
 }
+const clock = (hhmm: string) => { const m = toMin(hhmm) % 1440; return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`; };
+/** "seg a sex, às 21:00" */
+export function cutWhen(cut: CutRule) {
+  const d = [...cut.days].sort(), consecutive = d.length > 2 && d.every((x, i) => i === 0 || x === d[i - 1]! + 1);
+  return `${d.length === 7 ? 'todos os dias' : consecutive ? `${DAY_SHORT[d[0]!]} a ${DAY_SHORT[d.at(-1)!]}` : d.map((x) => DAY_SHORT[x]).join(', ')}, às ${clock(cut.at)}`;
+}
 export function ruleProblemText(problem: RuleProblem, courtName: string) {
+  if (problem.kind === 'cut') { const c = problem.cut!, at = clock(c.at); return `Às ${at} começa outra turma na ${courtName}: a reserva precisa terminar às ${at} ou começar a partir das ${at}${c.crossFrom ? ` (ou ir das ${clock(c.crossFrom)}, ou antes, até o fechamento)` : ''}.`; }
   if (problem.kind === 'minimum') return `A ${courtName} é alugada por no mínimo ${problem.minMinutes! / 60}h (pode começar em qualquer hora cheia).`;
   if (problem.kind === 'start') return `Na ${courtName} os horários começam sempre em hora cheia (19:00, 20:00…).`;
   if (problem.kind === 'duration') return `A ${courtName} é alugada só em horas cheias (1h, 2h, 3h…).`;

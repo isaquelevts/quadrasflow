@@ -81,10 +81,10 @@ export function BookingDialog({ open, onOpenChange, courts, weeklyHours, initial
     if (monthlyHit && !isBlock) return { hard: true, text: `Conflito com o horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
     if (monthlyHit) return { hard: false, text: `Atenção: este bloqueio cobre o horário fixo do mensalista ${monthlyHit.customer_name} (${formatTime(monthlyHit.start_at)}–${formatTime(monthlyHit.end_at)}).` };
     // Regra da quadra (horas cheias, horário nobre): a equipe pode abrir exceção, só avisa.
-    const court = courts.find((c) => c.id === courtId), problem = !isBlock && court ? ruleProblem(rulesOf(court.rules), new Date(`${date}T12:00:00Z`).getUTCDay(), start, end, opening?.open ?? 0) : null;
+    const court = courts.find((c) => c.id === courtId), problem = !isBlock && court ? ruleProblem(rulesOf(court.rules), new Date(`${date}T12:00:00Z`).getUTCDay(), start, end, opening?.open ?? 0, opening?.close) : null;
     if (problem && court) return { hard: false, text: `Fora da regra da quadra: ${ruleProblemText(problem, court.name)} Você pode salvar mesmo assim.` };
     return null;
-  }, [day, courtId, start, end, booking?.id, isBlock, courts, date, opening?.open]);
+  }, [day, courtId, start, end, booking?.id, isBlock, courts, date, opening?.open, opening?.close]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError('');

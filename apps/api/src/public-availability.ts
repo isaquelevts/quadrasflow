@@ -12,7 +12,7 @@ export function endOptions(start: number, close: number, busy: readonly Busy[], 
   const out: number[] = [];
   for (let end = start + STEP; end <= Math.min(start + maxDuration, close); end += STEP) {
     if (!free(end - STEP, end, busy)) break;
-    if (end - start >= MIN_DURATION && !ruleProblem(rules, weekday, start, end, opening)) out.push(end);
+    if (end - start >= MIN_DURATION && !ruleProblem(rules, weekday, start, end, opening, close)) out.push(end);
   }
   return out;
 }

@@ -47,3 +47,12 @@ test('mínimo de 2h: todos os inícios em hora cheia, fins a partir de +2h', () 
   assert.deepEqual(freeStarts(h('08:00'), h('13:00'), 0, [{ start: h('11:00'), end: h('12:00') }], r), [h('08:00'), h('09:00')], 'só cabem 2h antes da reserva das 11h');
   assert.deepEqual(freeStarts(h('07:00'), h('13:00'), 0, [], { step: 180, prime: [] }), [h('07:00'), h('08:00'), h('09:00'), h('10:00')]);
 });
+
+test('horário de corte às 21h (exceção 17h) na página pública: 20h some, 18h termina às 21h, 17h pode ir até 00h', () => {
+  const r: CourtRules = { step: 120, prime: [], cuts: [{ days: [3], at: '21:00', crossFrom: '17:00' }] };
+  const starts = freeStarts(h('08:00'), 1440, 0, [], r, 3);
+  assert.ok(!starts.includes(h('20:00')) && starts.includes(h('19:00')) && starts.includes(h('21:00')) && !starts.includes(h('23:00')), starts.map((m) => m / 60).join(','));
+  assert.deepEqual(endOptions(h('18:00'), 1440, [], 480, r, 3, h('08:00')), [h('20:00'), h('21:00')]);
+  assert.deepEqual(endOptions(h('17:00'), 1440, [], 480, r, 3, h('08:00')), [h('19:00'), h('20:00'), h('21:00'), 1440]);
+  assert.deepEqual(endOptions(h('21:00'), 1440, [], 480, r, 3, h('08:00')), [h('23:00'), 1440]);
+});

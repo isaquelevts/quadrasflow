@@ -126,7 +126,7 @@ export async function rescheduleOwnBooking(companyId:string,phone:string,id:stri
   const court=(await tx.select().from(courts).where(and(eq(courts.id,to.courtId),eq(courts.companyId,companyId),eq(courts.active,true))).limit(1))[0];if(!court)throw fail(404,'A quadra não está disponível.');
   /* vale o funcionamento do dia ou, de madrugada, o do dia anterior */const od=operatingDayOf(await tx.select().from(companyHours).where(eq(companyHours.companyId,companyId)),to.startAt,to.endAt);
   if(!od)throw fail(400,'Esse horário está fora do funcionamento da arena.');
-  const issue=ruleProblem(parseCourtRules(court.bookingRules),od.weekday,od.start,od.end,od.open);if(issue)throw fail(400,ruleProblemText(issue,court.name));
+  const issue=ruleProblem(parseCourtRules(court.bookingRules),od.weekday,od.start,od.end,od.open,od.close);if(issue)throw fail(400,ruleProblemText(issue,court.name));
   const [conflict,block]=await Promise.all([tx.select({id:bookings.id}).from(bookings).where(and(eq(bookings.companyId,companyId),eq(bookings.courtId,to.courtId),ne(bookings.status,'cancelled'),ne(bookings.id,id),lt(bookings.startAt,to.endAt),sql`${bookings.endAt} > ${to.startAt}`)).limit(1),tx.select({id:blockedSlots.id}).from(blockedSlots).where(and(eq(blockedSlots.companyId,companyId),eq(blockedSlots.courtId,to.courtId),lt(blockedSlots.startAt,to.endAt),sql`${blockedSlots.endAt} > ${to.startAt}`)).limit(1)]);
   if(conflict.length||block.length)throw fail(409,'Esse horário acabou de ser ocupado.');
   const monthly=await findMonthlyConflict(tx,companyId,to.courtId,to.startAt,to.endAt);if(monthly)throw fail(409,monthlyConflictMessage(monthly));

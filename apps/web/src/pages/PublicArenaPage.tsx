@@ -105,9 +105,16 @@ function BookingPage({ slug }: { slug: string }) {
   // Fins válidos: livres até ali e dentro das regras da quadra (só horas cheias, mínimo no horário nobre).
   const endsFor = useCallback((id: string, s: number) => {
     const busy = busyFor(id), rules = rulesFor(id), out: number[] = [];
-    for (let e = s + STEP; e <= Math.min(s + maxDuration, close); e += STEP) { if (overlaps(busy, e - STEP, e)) break; if (e - s >= MIN_DURATION && !ruleProblem(rules, weekday, s, e, open)) out.push(e); }
+    for (let e = s + STEP; e <= Math.min(s + maxDuration, close); e += STEP) { if (overlaps(busy, e - STEP, e)) break; if (e - s >= MIN_DURATION && !ruleProblem(rules, weekday, s, e, open, close)) out.push(e); }
     return out;
   }, [busyFor, rulesFor, open, close, maxDuration, weekday]);
+  // Início que as regras da quadra permitem, mesmo com a quadra vazia (ex.: 20h com corte às 21h não serve nunca).
+  // Esses somem da grade; os que só estão ocupados aparecem riscados.
+  const ruleAllows = useCallback((id: string, s: number) => {
+    const rules = rulesFor(id);
+    for (let e = s + MIN_DURATION; e <= Math.min(s + maxDuration, close); e += STEP) if (!ruleProblem(rules, weekday, s, e, open, close)) return true;
+    return false;
+  }, [rulesFor, maxDuration, close, weekday, open]);
   // Inícios: de 30 em 30 ou só horas cheias, e só os que têm pelo menos um fim válido.
   const startsFor = useCallback((id: string) => {
     if (!data?.hours.is_open) return [] as number[];
@@ -269,7 +276,7 @@ function BookingPage({ slug }: { slug: string }) {
             <div className="space-y-4">
               {([['Manhã', Sunrise, 0, 720], ['Tarde', Sun, 720, 1080], ['Noite', Moon, 1080, 1440], ['Madrugada', Moon, 1440, 2880]] as const).map(([label, Icon, a, b]) => {
                 // Só inícios que ainda podem acontecer (não passados e com 1h antes de fechar); riscado = ocupado.
-                const starts = startsFor(courtId), step = gridStep(rulesFor(courtId)), slots: number[] = []; for (let t = firstStart(rulesFor(courtId), Math.max(a, open, notBefore), open); t < b && t + minDuration(rulesFor(courtId)) <= close; t += step) slots.push(t);
+                const starts = startsFor(courtId), step = gridStep(rulesFor(courtId)), slots: number[] = []; for (let t = firstStart(rulesFor(courtId), Math.max(a, open, notBefore), open); t < b && t + minDuration(rulesFor(courtId)) <= close; t += step) if (ruleAllows(courtId, t)) slots.push(t);
                 if (!slots.length) return null;
                 if (!slots.some((t) => starts.includes(t))) return <div key={label} className="flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground/60 uppercase"><Icon className="size-3.5" aria-hidden="true" />{label} · sem horários</div>;
                 return <div key={label}><div className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted-foreground uppercase"><Icon className="size-3.5" aria-hidden="true" />{label}</div>
@@ -282,10 +289,12 @@ function BookingPage({ slug }: { slug: string }) {
           <Step id="passo-fim" n={4} title="Até que horas?" done={end !== null && start !== null ? `${hm(end)} · ${durationLabel(end - start)}` : ''} locked={start === null} lockedText={maxDuration === 60 ? "Cada reserva tem 1h." : `Você pode jogar de 1h a ${durationLabel(maxDuration)}.`}>
             {court && start !== null && (() => {
               const ends = endsFor(court.id, start), last = ends.at(-1) ?? start, cut = start + maxDuration > last;
-              const why = !cut ? '' : last >= close ? `A arena fecha às ${hm(close)}.` : `A quadra está reservada a partir das ${hm(last)}.`;
               // Regra da quadra que explica por que não há 1h (ou 1h30) para esse início.
-              const rules = rulesFor(court.id), shortest = ruleProblem(rules, weekday, start, start + 60, open) ?? ruleProblem(rules, weekday, start, start + 90, open);
-              const ruleNote = shortest ? ruleProblemText(shortest, court.name) : '';
+              const rules = rulesFor(court.id), shortest = ruleProblem(rules, weekday, start, start + 60, open, close) ?? ruleProblem(rules, weekday, start, start + 90, open, close);
+              // Horário de corte logo depois do último fim oferecido: a explicação é a turma seguinte, não "reservada".
+              const cutAfter = cut && last < close ? ruleProblem(rules, weekday, start, last + 60, open, close) : null;
+              const why = !cut ? '' : last >= close ? `A arena fecha às ${hm(close)}.` : cutAfter?.kind === 'cut' ? '' : `A quadra está reservada a partir das ${hm(last)}.`;
+              const ruleNote = cutAfter?.kind === 'cut' ? ruleProblemText(cutAfter, court.name) : shortest ? ruleProblemText(shortest, court.name) : '';
               return <>
                 <div className="-mx-4 flex snap-x gap-2 overflow-x-auto px-4 pb-1 [scrollbar-width:none] lg:mx-0 lg:grid lg:grid-cols-4 lg:px-0" role="radiogroup" aria-label="Horário de fim">
                   {ends.map((e) => { const sel = end === e; return <button key={e} type="button" role="radio" aria-checked={sel} onClick={() => pickEnd(e)} className={cn('w-[104px] shrink-0 snap-start rounded-2xl border-2 px-3 py-2.5 text-left transition active:scale-95 lg:w-auto', sel ? 'border-brand-900 bg-brand-900 text-white shadow-md' : 'border-border bg-white hover:border-brand-500')}>
