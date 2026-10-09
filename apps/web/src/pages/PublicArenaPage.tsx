@@ -243,15 +243,19 @@ function BookingPage({ slug }: { slug: string }) {
             <div className="grid gap-2 sm:grid-cols-3 sm:gap-3" role="radiogroup" aria-label="Quadra">
               {data.courts.map((c) => {
                 const sel = c.id === courtId, n = startsFor(c.id).length;
-                return <button key={c.id} type="button" role="radio" aria-checked={sel} disabled={!n} onClick={() => pickCourt(c.id)} className={cn('flex items-center overflow-hidden rounded-2xl border-2 text-left transition active:scale-[.98] disabled:opacity-50 sm:block', sel ? 'border-brand-600 bg-brand-50/60 ring-4 ring-brand-500/10' : 'border-border bg-white hover:border-brand-400')}>
+                return <button key={c.id} type="button" role="radio" aria-checked={sel} disabled={!n} onClick={() => pickCourt(c.id)} className={cn('flex items-center overflow-hidden rounded-2xl border-2 text-left transition active:scale-[.98] disabled:opacity-50 sm:h-full sm:flex-col sm:items-stretch', sel ? 'border-brand-600 bg-brand-50/60 ring-4 ring-brand-500/10' : 'border-border bg-white hover:border-brand-400')}>
                   <div className="relative m-2 size-20 shrink-0 overflow-hidden rounded-xl bg-brand-50 sm:m-0 sm:h-28 sm:w-full sm:rounded-none">
                     {c.photo_url ? <img src={c.photo_url} alt="" className="size-full object-cover" /> : <span className="grid size-full place-items-center text-brand-600"><CalendarCheck className="size-6" aria-hidden="true" /></span>}
                   </div>
-                  <div className="flex flex-1 items-center justify-between gap-2 p-2 pr-3 sm:items-end sm:p-3">
-                    <div className="min-w-0"><div className="text-[15px] font-semibold">{c.name}</div><div className="text-[12.5px] text-muted-foreground">{c.sport}</div>
-                      {placeOf(c) && <div className="mt-0.5 flex items-start gap-1 text-[11.5px] text-muted-foreground"><MapPin className="mt-px size-3 shrink-0" aria-hidden="true" /><span className="line-clamp-2">{placeOf(c)}</span></div>}
-                      <div className={cn('mt-0.5 text-[12px]', n ? 'font-medium text-brand-600' : 'text-muted-foreground')}>{n ? 'Horários livres' : 'Lotada neste dia'}</div></div>
-                    <div className="shrink-0 text-right"><div className="font-bold tabular-nums">{brl(c.price_cents).replace(',00', '')}</div><div className="text-[11px] text-muted-foreground">por hora</div></div>
+                  {/* Mesma estrutura em todos os cards: nome e preço na mesma linha; endereço (se houver) numa linha própria no fim. */}
+                  <div className="flex min-w-0 flex-1 items-center gap-2 p-2 pr-3 sm:flex-col sm:items-stretch sm:gap-0 sm:p-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start justify-between gap-2"><div className="min-w-0 truncate text-[15px] font-semibold">{c.name}</div><div className="shrink-0 text-right font-bold tabular-nums">{brl(c.price_cents).replace(',00', '')}</div></div>
+                      <div className="flex items-baseline justify-between gap-2"><div className="truncate text-[12.5px] text-muted-foreground">{c.sport}</div><div className="shrink-0 text-[11px] text-muted-foreground">por hora</div></div>
+                      {placeOf(c) && <div className="flex min-w-0 items-center gap-1 text-[11.5px] text-muted-foreground sm:hidden" title={placeOf(c)}><MapPin className="size-3 shrink-0" aria-hidden="true" /><span className="truncate">{placeOf(c)}</span></div>}
+                      <div className={cn('mt-0.5 text-[12px]', n ? 'font-medium text-brand-600' : 'text-muted-foreground')}>{n ? 'Horários livres' : 'Lotada neste dia'}</div>
+                    </div>
+                    {placeOf(c) && <div className="mt-1 flex min-w-0 items-center gap-1 text-[11.5px] text-muted-foreground max-sm:hidden sm:mt-auto sm:border-t sm:pt-2" title={placeOf(c)}><MapPin className="size-3 shrink-0" aria-hidden="true" /><span className="truncate">{placeOf(c)}</span></div>}
                     <span aria-hidden="true" className={cn('grid size-6 shrink-0 place-items-center rounded-full border-2 sm:hidden', sel ? 'border-brand-900 bg-brand-900 text-lime-400' : 'border-border')}>{sel && <Check className="size-3.5" />}</span>
                   </div>
                 </button>;
